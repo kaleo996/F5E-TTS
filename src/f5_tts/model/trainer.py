@@ -45,6 +45,7 @@ class Trainer:
         wandb_resume_id: str = None,
         log_samples: bool = False,
         last_per_updates=None,
+        log_samples_per_updates=None,
         accelerate_kwargs: dict = dict(),
         ema_kwargs: dict = dict(),
         bnb_optimizer: bool = False,
@@ -53,7 +54,7 @@ class Trainer:
         local_vocoder_path: str = "",  # local vocoder path
         model_cfg_dict: dict = dict(),  # training config
     ):
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
 
         if logger == "wandb" and not wandb.api.api_key:
             logger = None
@@ -114,6 +115,7 @@ class Trainer:
         self.save_per_updates = save_per_updates
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
         self.last_per_updates = default(last_per_updates, save_per_updates)
+        self.log_samples_per_updates = default(log_samples_per_updates, save_per_updates)
         self.checkpoint_path = default(checkpoint_path, "ckpts/test_f5-tts")
 
         self.batch_size_per_gpu = batch_size_per_gpu
@@ -395,13 +397,13 @@ class Trainer:
                         self.writer.add_scalar("loss", loss.item(), global_update)
                         self.writer.add_scalar("lr", self.scheduler.get_last_lr()[0], global_update)
 
-                if global_update % self.last_per_updates == 0 and self.accelerator.sync_gradients:
-                    self.save_checkpoint(global_update, last=True)
+                if self.accelerator.sync_gradients:
+                    if global_update % self.last_per_updates == 0:
+                        self.save_checkpoint(global_update, last=True)
+                    elif global_update % self.save_per_updates == 0:
+                        self.save_checkpoint(global_update)
 
-                if global_update % self.save_per_updates == 0 and self.accelerator.sync_gradients:
-                    self.save_checkpoint(global_update)
-
-                    if self.log_samples and self.accelerator.is_local_main_process:
+                    if self.log_samples and self.accelerator.is_local_main_process and global_update % self.log_samples_per_updates == 0:
                         ref_audio_len = mel_lengths[0]
                         infer_text = [
                             text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]

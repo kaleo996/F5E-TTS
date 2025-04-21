@@ -56,6 +56,7 @@ def main(model_cfg):
         wandb_run_name=exp_name,
         wandb_resume_id=wandb_resume_id,
         last_per_updates=model_cfg.ckpts.last_per_updates,
+        log_samples_per_updates=model_cfg.ckpts.log_samples_per_updates,
         log_samples=model_cfg.ckpts.log_samples,
         bnb_optimizer=model_cfg.optim.bnb_optimizer,
         mel_spec_type=mel_spec_type,
