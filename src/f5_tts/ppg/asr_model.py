@@ -20,20 +20,20 @@ import torch
 
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
-from wenet.transformer.cmvn import GlobalCMVN
-from wenet.transformer.ctc import CTC
-from wenet.transformer.etc import (SoftmaxLoss, StatsPool)
-from wenet.transformer.decoder import (TransformerDecoder,
+from f5_tts.ppg.wenet.transformer.cmvn import GlobalCMVN
+from f5_tts.ppg.wenet.transformer.ctc import CTC
+from f5_tts.ppg.wenet.transformer.etc import (SoftmaxLoss, StatsPool)
+from f5_tts.ppg.wenet.transformer.decoder import (TransformerDecoder,
                                        BiTransformerDecoder)
-from wenet.transformer.encoder import ConformerEncoder
-from wenet.transformer.encoder import TransformerEncoder
-from wenet.transformer.label_smoothing_loss import LabelSmoothingLoss
-from wenet.utils.cmvn import load_cmvn
-from wenet.utils.grl import GradientReverseLayer
-from wenet.utils.common import (IGNORE_ID, add_sos_eos, log_add,
+from f5_tts.ppg.wenet.transformer.encoder import ConformerEncoder
+from f5_tts.ppg.wenet.transformer.encoder import TransformerEncoder
+from f5_tts.ppg.wenet.transformer.label_smoothing_loss import LabelSmoothingLoss
+from f5_tts.ppg.wenet.utils.cmvn import load_cmvn
+from f5_tts.ppg.wenet.utils.grl import GradientReverseLayer
+from f5_tts.ppg.wenet.utils.common import (IGNORE_ID, add_sos_eos, log_add,
                                 remove_duplicates_and_blank, th_accuracy,
                                 reverse_pad_list)
-from wenet.utils.mask import (make_pad_mask, mask_finished_preds,
+from f5_tts.ppg.wenet.utils.mask import (make_pad_mask, mask_finished_preds,
                               mask_finished_scores, subsequent_mask)
 
 
