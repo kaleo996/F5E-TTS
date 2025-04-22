@@ -10,23 +10,23 @@ import torch
 import torch.nn.functional as F
 # from typeguard import check_argument_types
 
-from wenet.transformer.attention import MultiHeadedAttention
-from wenet.transformer.attention import RelPositionMultiHeadedAttention
-from wenet.transformer.convolution import ConvolutionModule
-from wenet.transformer.embedding import PositionalEncoding
-from wenet.transformer.embedding import RelPositionalEncoding
-from wenet.transformer.embedding import NoPositionalEncoding
-from wenet.transformer.encoder_layer import TransformerEncoderLayer
-from wenet.transformer.encoder_layer import ConformerEncoderLayer
-from wenet.transformer.positionwise_feed_forward import PositionwiseFeedForward
-from wenet.transformer.subsampling import Conv2dSubsampling2
-from wenet.transformer.subsampling import Conv2dSubsampling4
-from wenet.transformer.subsampling import Conv2dSubsampling6
-from wenet.transformer.subsampling import Conv2dSubsampling8
-from wenet.transformer.subsampling import LinearNoSubsampling
-from wenet.utils.common import get_activation
-from wenet.utils.mask import make_pad_mask
-from wenet.utils.mask import add_optional_chunk_mask
+from f5_tts.ppg.wenet.transformer.attention import MultiHeadedAttention
+from f5_tts.ppg.wenet.transformer.attention import RelPositionMultiHeadedAttention
+from f5_tts.ppg.wenet.transformer.convolution import ConvolutionModule
+from f5_tts.ppg.wenet.transformer.embedding import PositionalEncoding
+from f5_tts.ppg.wenet.transformer.embedding import RelPositionalEncoding
+from f5_tts.ppg.wenet.transformer.embedding import NoPositionalEncoding
+from f5_tts.ppg.wenet.transformer.encoder_layer import TransformerEncoderLayer
+from f5_tts.ppg.wenet.transformer.encoder_layer import ConformerEncoderLayer
+from f5_tts.ppg.wenet.transformer.positionwise_feed_forward import PositionwiseFeedForward
+from f5_tts.ppg.wenet.transformer.subsampling import Conv2dSubsampling2
+from f5_tts.ppg.wenet.transformer.subsampling import Conv2dSubsampling4
+from f5_tts.ppg.wenet.transformer.subsampling import Conv2dSubsampling6
+from f5_tts.ppg.wenet.transformer.subsampling import Conv2dSubsampling8
+from f5_tts.ppg.wenet.transformer.subsampling import LinearNoSubsampling
+from f5_tts.ppg.wenet.utils.common import get_activation
+from f5_tts.ppg.wenet.utils.mask import make_pad_mask
+from f5_tts.ppg.wenet.utils.mask import add_optional_chunk_mask
 
 
 class BaseEncoder(torch.nn.Module):

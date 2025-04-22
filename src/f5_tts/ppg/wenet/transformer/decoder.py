@@ -7,11 +7,11 @@ from typing import Tuple, List, Optional
 import torch
 # from typeguard import check_argument_types
 
-from wenet.transformer.attention import MultiHeadedAttention
-from wenet.transformer.decoder_layer import DecoderLayer
-from wenet.transformer.embedding import PositionalEncoding
-from wenet.transformer.positionwise_feed_forward import PositionwiseFeedForward
-from wenet.utils.mask import (subsequent_mask, make_pad_mask)
+from f5_tts.ppg.wenet.transformer.attention import MultiHeadedAttention
+from f5_tts.ppg.wenet.transformer.decoder_layer import DecoderLayer
+from f5_tts.ppg.wenet.transformer.embedding import PositionalEncoding
+from f5_tts.ppg.wenet.transformer.positionwise_feed_forward import PositionwiseFeedForward
+from f5_tts.ppg.wenet.utils.mask import (subsequent_mask, make_pad_mask)
 
 
 class TransformerDecoder(torch.nn.Module):

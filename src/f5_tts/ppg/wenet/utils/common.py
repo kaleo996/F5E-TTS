@@ -138,7 +138,7 @@ def th_accuracy(pad_outputs: torch.Tensor, pad_targets: torch.Tensor,
 def get_activation(act):
     """Return activation function."""
     # Lazy load to avoid unused import
-    from wenet.transformer.swish import Swish
+    from f5_tts.ppg.wenet.transformer.swish import Swish
 
     activation_funcs = {
         "hardtanh": torch.nn.Hardtanh,
