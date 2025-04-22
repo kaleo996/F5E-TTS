@@ -12,6 +12,7 @@ from tqdm import tqdm
 
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import default
+from f5_tts.ppg.wenet.dataset.feats import kaldiFbank
 
 
 class HFDataset(Dataset):
@@ -92,6 +93,7 @@ class CustomDataset(Dataset):
         mel_spec_type="vocos",
         preprocessed_mel=False,
         mel_spec_module: nn.Module | None = None,
+        use_ppg=False
     ):
         self.data = custom_dataset
         self.durations = durations
@@ -101,6 +103,7 @@ class CustomDataset(Dataset):
         self.win_length = win_length
         self.mel_spec_type = mel_spec_type
         self.preprocessed_mel = preprocessed_mel
+        self.use_ppg = use_ppg
 
         if not preprocessed_mel:
             self.mel_spectrogram = default(
@@ -114,6 +117,9 @@ class CustomDataset(Dataset):
                     mel_spec_type=mel_spec_type,
                 ),
             )
+            
+        if use_ppg:
+            self.featCal = kaldiFbank().eval()
 
     def get_frame_len(self, index):
         if (
@@ -137,9 +143,12 @@ class CustomDataset(Dataset):
                 break  # valid
 
             index = (index + 1) % len(self.data)
+        
+        data_item = dict(text=text)
 
         if self.preprocessed_mel:
             mel_spec = torch.tensor(row["mel_spec"])
+            data_item["mel_spec"] = mel_spec
         else:
             audio, source_sample_rate = torchaudio.load(audio_path)
 
@@ -149,17 +158,26 @@ class CustomDataset(Dataset):
 
             # resample if necessary
             if source_sample_rate != self.target_sample_rate:
-                resampler = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
-                audio = resampler(audio)
+                resampler_mel = torchaudio.transforms.Resample(source_sample_rate, self.target_sample_rate)
+                audio_mel_target_sr = resampler_mel(audio)
+            else:
+                audio_mel_target_sr = audio
 
             # to mel spectrogram
-            mel_spec = self.mel_spectrogram(audio)
+            mel_spec = self.mel_spectrogram(audio_mel_target_sr)
             mel_spec = mel_spec.squeeze(0)  # '1 d t -> d t'
-
-        return {
-            "mel_spec": mel_spec,
-            "text": text,
-        }
+            data_item["mel_spec"] = mel_spec
+        
+            if self.use_ppg:
+                if source_sample_rate != 16000:
+                    resampler_ppg = torchaudio.transforms.Resample(source_sample_rate, 16000)
+                    audio_ppg_target_sr = resampler_ppg(audio)
+                else:
+                    audio_ppg_target_sr = audio # TODO 这里的 audio 是什么形状？需要 unsqueeze(0) 吗？
+                feats, feats_len = self.featCal(audio_ppg_target_sr)
+                data_item["mel_spec_for_ppg"] = feats[0].transpose(0,1)
+        
+        return data_item
 
 
 # Dynamic Batch Sampler
@@ -247,6 +265,7 @@ def load_dataset(
     audio_type: str = "raw",
     mel_spec_module: nn.Module | None = None,
     mel_spec_kwargs: dict = dict(),
+    use_ppg=False,
 ) -> CustomDataset | HFDataset:
     """
     dataset_type    - "CustomDataset" if you want to use tokenizer name and default data path to load for train_dataset
@@ -255,6 +274,7 @@ def load_dataset(
 
     print("Loading dataset ...")
 
+    # TODO currently only support ppg in CustomDataset
     if dataset_type == "CustomDataset":
         rel_data_path = str(files("f5_tts").joinpath(f"../../data/{dataset_name}_{tokenizer}"))
         if audio_type == "raw":
@@ -274,6 +294,7 @@ def load_dataset(
             durations=durations,
             preprocessed_mel=preprocessed_mel,
             mel_spec_module=mel_spec_module,
+            use_ppg=use_ppg,
             **mel_spec_kwargs,
         )
 
@@ -321,10 +342,28 @@ def collate_fn(batch):
 
     text = [item["text"] for item in batch]
     text_lengths = torch.LongTensor([len(item) for item in text])
+    
+    if len(batch)>0 and "mel_spec_for_ppg" in batch[0]:
+        mel_specs_for_ppg = [item["mel_spec_for_ppg"].squeeze(0) for item in batch]
+        mel_lengths_for_ppg = torch.LongTensor([spec.shape[-1] for spec in mel_specs_for_ppg])
+        max_mel_length_for_ppg = mel_lengths_for_ppg.amax()
+        
+        padded_mel_specs_for_ppg = []
+        for spec in mel_specs_for_ppg:
+            padding = (0, max_mel_length_for_ppg - spec.size(-1))
+            padded_spec = F.pad(spec, padding, value=0)
+            padded_mel_specs_for_ppg.append(padded_spec)
+            
+        mel_specs_for_ppg = torch.stack(padded_mel_specs_for_ppg)
+    else:
+        mel_specs_for_ppg = None
+        mel_lengths_for_ppg = None
 
     return dict(
         mel=mel_specs,
         mel_lengths=mel_lengths,
         text=text,
         text_lengths=text_lengths,
+        mel_for_ppg=mel_specs_for_ppg,
+        mel_lengths_for_ppg=mel_lengths_for_ppg
     )

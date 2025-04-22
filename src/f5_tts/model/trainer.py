@@ -18,7 +18,7 @@ from tqdm import tqdm
 from f5_tts.model import CFM
 from f5_tts.model.dataset import DynamicBatchSampler, collate_fn
 from f5_tts.model.utils import default, exists
-
+from f5_tts.ppg.ppg_model import PPGModelWapper
 # trainer
 
 
@@ -38,7 +38,6 @@ class Trainer:
         grad_accumulation_steps=1,
         max_grad_norm=1.0,
         noise_scheduler: str | None = None,
-        duration_predictor: torch.nn.Module | None = None,
         logger: str | None = "wandb",  # "wandb" | "tensorboard" | None
         wandb_project="test_f5-tts",
         wandb_run_name="test_run",
@@ -53,6 +52,7 @@ class Trainer:
         is_local_vocoder: bool = False,  # use local path vocoder
         local_vocoder_path: str = "",  # local vocoder path
         model_cfg_dict: dict = dict(),  # training config
+        ppg_config = dict()
     ):
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
 
@@ -131,8 +131,6 @@ class Trainer:
 
         self.noise_scheduler = noise_scheduler
 
-        self.duration_predictor = duration_predictor
-
         if bnb_optimizer:
             import bitsandbytes as bnb
 
@@ -140,6 +138,10 @@ class Trainer:
         else:
             self.optimizer = AdamW(model.parameters(), lr=learning_rate)
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
+        
+        self.use_ppg = ppg_config["use_ppg"]
+        if self.use_ppg:
+            self.ppg_config = ppg_config
 
     @property
     def is_main(self):
@@ -315,6 +317,20 @@ class Trainer:
             self.num_warmup_updates * self.accelerator.num_processes
         )  # consider a fixed warmup steps while using accelerate multi-gpu ddp
         # otherwise by default with split_batches=False, warmup steps change with num_processes
+        
+        if self.use_ppg:
+            ppg_model = PPGModelWapper(
+                self.ppg_config["model_path"],
+                self.ppg_config["config"],
+                device= self.accelerator.device, 
+                output_type=self.ppg_config["output_type"], 
+                ppg_frame_length=self.ppg_config["frame_length"], 
+                mel_f_shift = self.ppg_config["mel_frame_shift"], 
+                map_mix_ratio=self.ppg_config["map_mix_ratio"], 
+                global_phn_center_path=self.ppg_config["global_phn_center_path"],
+                para_softmax_path = self.ppg_config["para_softmax_path"]
+            )
+        
         total_updates = math.ceil(len(train_dataloader) / self.grad_accumulation_steps) * self.epochs
         decay_updates = total_updates - warmup_updates
         warmup_scheduler = LinearLR(self.optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_updates)
@@ -363,14 +379,19 @@ class Trainer:
                     text_inputs = batch["text"]
                     mel_spec = batch["mel"].permute(0, 2, 1)
                     mel_lengths = batch["mel_lengths"]
-
-                    # TODO. add duration predictor training
-                    if self.duration_predictor is not None and self.accelerator.is_local_main_process:
-                        dur_loss = self.duration_predictor(mel_spec, lens=batch.get("durations"))
-                        self.accelerator.log({"duration loss": dur_loss.item()}, step=global_update)
+                    mel_spec_for_ppg = batch["mel_for_ppg"]
+                    mel_lengths_for_ppg = batch["mel_lengths_for_ppg"]
+                    
+                    if mel_spec_for_ppg is not None:
+                        with torch.no_grad():
+                            mel_spec_for_ppg = mel_spec_for_ppg.transpose(1, 2)
+                            ppg, ppg_lengths = ppg_model.mel_to_ppg(mel_spec_for_ppg,mel_lengths_for_ppg)
+                            ppg_inputs = [ppg, ppg_lengths]
+                    else:
+                        ppg_inputs = None
 
                     loss, cond, pred = self.model(
-                        mel_spec, text=text_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
+                        mel_spec, text=text_inputs, ppg=ppg_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
                     )
                     self.accelerator.backward(loss)
 
@@ -400,7 +421,7 @@ class Trainer:
                 if self.accelerator.sync_gradients:
                     if global_update % self.last_per_updates == 0:
                         self.save_checkpoint(global_update, last=True)
-                    elif global_update % self.save_per_updates == 0:
+                    if global_update % self.save_per_updates == 0:
                         self.save_checkpoint(global_update)
 
                     if self.log_samples and self.accelerator.is_local_main_process and global_update % self.log_samples_per_updates == 0:
@@ -408,27 +429,70 @@ class Trainer:
                         infer_text = [
                             text_inputs[0] + ([" "] if isinstance(text_inputs[0], list) else " ") + text_inputs[0]
                         ]
+                        if self.use_ppg:
+                            valid_ppg = ppg[0, :ppg_lengths[0], :]
+                            infer_ppg = torch.cat([valid_ppg, valid_ppg]).unsqueeze(0)
+                            with torch.inference_mode():
+                                generated_txt_ppg, _ = self.accelerator.unwrap_model(self.model).sample(
+                                    cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
+                                    text=infer_text,
+                                    ppg=infer_ppg,
+                                    duration=ref_audio_len * 2,
+                                    steps=nfe_step,
+                                    cfg_strength=cfg_strength,
+                                    sway_sampling_coef=sway_sampling_coef,
+                                )
+                                generated_txt_ppg = generated_txt_ppg.to(torch.float32)
+                                gen_txt_ppg_mel_spec = generated_txt_ppg[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                                
+                                generated_ppg, _ = self.accelerator.unwrap_model(self.model).sample(
+                                    cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
+                                    text=None,
+                                    ppg=infer_ppg,
+                                    duration=ref_audio_len * 2,
+                                    steps=nfe_step,
+                                    cfg_strength=cfg_strength,
+                                    sway_sampling_coef=sway_sampling_coef,
+                                )
+                                generated_ppg = generated_ppg.to(torch.float32)
+                                gen_ppg_mel_spec = generated_ppg[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                                
+                                if self.vocoder_name == "vocos":
+                                    gen_audio_txt_ppg = vocoder.decode(gen_txt_ppg_mel_spec).cpu()
+                                    gen_audio_ppg = vocoder.decode(gen_ppg_mel_spec).cpu()
+                                elif self.vocoder_name == "bigvgan":
+                                    gen_audio_txt_ppg = vocoder(gen_txt_ppg_mel_spec).squeeze(0).cpu()
+                                    gen_audio_ppg = vocoder(gen_ppg_mel_spec).squeeze(0).cpu()
+                                    
+                            torchaudio.save(
+                                f"{log_samples_path}/update_{global_update}_gen_txt_ppg.wav", gen_audio_txt_ppg, target_sample_rate
+                            )
+                            torchaudio.save(
+                                f"{log_samples_path}/update_{global_update}_gen_ppg.wav", gen_audio_ppg, target_sample_rate
+                            )
+                        
                         with torch.inference_mode():
-                            generated, _ = self.accelerator.unwrap_model(self.model).sample(
+                            generated_txt, _ = self.accelerator.unwrap_model(self.model).sample(
                                 cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
                                 text=infer_text,
+                                ppg=None,
                                 duration=ref_audio_len * 2,
                                 steps=nfe_step,
                                 cfg_strength=cfg_strength,
                                 sway_sampling_coef=sway_sampling_coef,
                             )
-                            generated = generated.to(torch.float32)
-                            gen_mel_spec = generated[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
+                            generated_txt = generated_txt.to(torch.float32)
+                            gen_txt_mel_spec = generated_txt[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
                             ref_mel_spec = batch["mel"][0].unsqueeze(0)
                             if self.vocoder_name == "vocos":
-                                gen_audio = vocoder.decode(gen_mel_spec).cpu()
+                                gen_audio_txt = vocoder.decode(gen_txt_mel_spec).cpu()
                                 ref_audio = vocoder.decode(ref_mel_spec).cpu()
                             elif self.vocoder_name == "bigvgan":
-                                gen_audio = vocoder(gen_mel_spec).squeeze(0).cpu()
+                                gen_audio_txt = vocoder(gen_txt_mel_spec).squeeze(0).cpu()
                                 ref_audio = vocoder(ref_mel_spec).squeeze(0).cpu()
 
                         torchaudio.save(
-                            f"{log_samples_path}/update_{global_update}_gen.wav", gen_audio, target_sample_rate
+                            f"{log_samples_path}/update_{global_update}_gen_txt.wav", gen_audio_txt, target_sample_rate
                         )
                         torchaudio.save(
                             f"{log_samples_path}/update_{global_update}_ref.wav", ref_audio, target_sample_rate

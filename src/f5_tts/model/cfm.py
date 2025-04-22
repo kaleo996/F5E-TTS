@@ -46,6 +46,7 @@ class CFM(nn.Module):
         mel_spec_kwargs: dict = dict(),
         frac_lengths_mask: tuple[float, float] = (0.7, 1.0),
         vocab_char_map: dict[str:int] | None = None,
+        ppg_config=dict()
     ):
         super().__init__()
 
@@ -73,6 +74,10 @@ class CFM(nn.Module):
 
         # vocab map for tokenization
         self.vocab_char_map = vocab_char_map
+        
+        self.use_ppg = ppg_config["use_ppg"]
+        if self.use_ppg:
+            self.combined_cond_drop_prob = ppg_config["combined_cond_drop_prob"]
 
     @property
     def device(self):
@@ -83,6 +88,7 @@ class CFM(nn.Module):
         self,
         cond: float["b n d"] | float["b nw"],  # noqa: F722
         text: int["b nt"] | list[str],  # noqa: F722
+        ppg,
         duration: int | int["b"],  # noqa: F821
         *,
         lens: int["b"] | None = None,  # noqa: F821
@@ -129,9 +135,11 @@ class CFM(nn.Module):
         if isinstance(duration, int):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
 
-        duration = torch.maximum(
-            torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration
-        )  # duration at least text/audio prompt length plus one token, so something is generated
+        # duration at least text/audio prompt length plus one token, so something is generated
+        if text is not None:
+            duration = torch.maximum(torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration)
+        else:
+            duration = torch.maximum(lens + 1, duration)
         duration = duration.clamp(max=max_duration)
         max_duration = duration.amax()
 
@@ -162,13 +170,15 @@ class CFM(nn.Module):
 
             # predict flow
             pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False, cache=True
+                x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
+                drop_audio_cond=False, drop_text=False, drop_ppg=False, cache=True
             )
             if cfg_strength < 1e-5:
                 return pred
 
             null_pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True, cache=True
+                x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
+                drop_audio_cond=True, drop_text=True, drop_ppg=True, cache=True
             )
             return pred + (pred - null_pred) * cfg_strength
 
@@ -211,10 +221,14 @@ class CFM(nn.Module):
         self,
         inp: float["b n d"] | float["b nw"],  # mel or raw wave  # noqa: F722
         text: int["b nt"] | list[str],  # noqa: F722
+        ppg,
         *,
         lens: int["b"] | None = None,  # noqa: F821
         noise_scheduler: str | None = None,
     ):
+        if ppg is not None and isinstance(ppg, list):
+            ppg, ppg_len = ppg
+        
         # handle raw wave
         if inp.ndim == 2:
             inp = self.mel_spec(inp)
@@ -264,16 +278,32 @@ class CFM(nn.Module):
 
         # transformer and cfg training with a drop rate
         drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
-        if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
-            drop_audio_cond = True
-            drop_text = True
+        if self.use_ppg:
+            random_num = random()
+            if random_num < self.combined_cond_drop_prob[0]:
+                drop_text = drop_ppg = False
+            elif random_num < self.combined_cond_drop_prob[1] + self.combined_cond_drop_prob[0]:
+                drop_text = True
+                drop_ppg = False
+            elif random_num < self.combined_cond_drop_prob[2] + self.combined_cond_drop_prob[1] + self.combined_cond_drop_prob[0]:
+                drop_text = False
+                drop_ppg = True
+            else:
+                drop_text = drop_ppg = True
+                drop_audio_cond = True
         else:
-            drop_text = False
+            drop_ppg = False
+            if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
+                drop_audio_cond = True
+                drop_text = True
+            else:
+                drop_text = False
 
         # if want rigorously mask out padding, record in collate_fn in dataset.py, and pass in here
         # adding mask will use more memory, thus also need to adjust batchsampler with scaled down threshold for long sequences
         pred = self.transformer(
-            x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text
+            x=φ, cond=cond, text=text, ppg=ppg, time=time,
+            drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg
         )
 
         # flow matching loss

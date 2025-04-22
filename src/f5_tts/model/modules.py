@@ -729,3 +729,10 @@ class TimestepEmbedding(nn.Module):
         time_hidden = time_hidden.to(timestep.dtype)
         time = self.time_mlp(time_hidden)  # b d
         return time
+
+
+class PPGInputTranspose(nn.Identity):
+    """(N, T, D) -> (N, D, T)"""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return input.transpose(1, 2)

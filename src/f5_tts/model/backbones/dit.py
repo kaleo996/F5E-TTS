@@ -21,6 +21,7 @@ from f5_tts.model.modules import (
     ConvPositionEmbedding,
     DiTBlock,
     AdaLayerNorm_Final,
+    PPGInputTranspose,
     precompute_freqs_cis,
     get_pos_embed_indices,
 )
@@ -46,16 +47,19 @@ class TextEmbedding(nn.Module):
         else:
             self.extra_modeling = False
 
-    def forward(self, text: int["b nt"], seq_len, drop_text=False):  # noqa: F722
-        text = text + 1  # use 0 as filler token. preprocess of batch pad -1, see list_str_to_idx()
-        text = text[:, :seq_len]  # curtail if character tokens are more than the mel spec tokens
-        batch, text_len = text.shape[0], text.shape[1]
-        text = F.pad(text, (0, seq_len - text_len), value=0)
-        if self.mask_padding:
-            text_mask = text == 0
+    def forward(self, text: int["b nt"], batch, seq_len, drop_text=False):  # noqa: F722
+        if text is None:
+            text = torch.zeros((batch, seq_len)).int().to(self.text_embed.weight.device)
+        else:
+            text = text + 1  # use 0 as filler token. preprocess of batch pad -1, see list_str_to_idx()
+            text = text[:, :seq_len]  # curtail if character tokens are more than the mel spec tokens
+            batch, text_len = text.shape[0], text.shape[1]
+            text = F.pad(text, (0, seq_len - text_len), value=0) # pad to the same length as mel
+            if self.mask_padding:
+                text_mask = text == 0
 
-        if drop_text:  # cfg for text
-            text = torch.zeros_like(text)
+            if drop_text:  # cfg for text
+                text = torch.zeros_like(text)
 
         text = self.text_embed(text)  # b n -> b n d
 
@@ -79,20 +83,65 @@ class TextEmbedding(nn.Module):
         return text
 
 
+# PPG embedding
+
+
+class PPGEmbedding(nn.Module):
+    def __init__(self, ppg_dim, text_dim):
+        super().__init__()
+        self.ppg_dim = ppg_dim
+        self.text_dim = text_dim
+        self.ppg_proj = nn.Sequential(
+            nn.Linear(ppg_dim, ppg_dim),
+            PPGInputTranspose(),
+            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+            nn.BatchNorm1d(ppg_dim),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+            nn.BatchNorm1d(ppg_dim),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+            nn.BatchNorm1d(ppg_dim),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            PPGInputTranspose(),
+            nn.Linear(ppg_dim, text_dim), # output ppg in the same dimension as text for alignment
+        )
+        
+    def forward(self, ppg_embed: None | float["b n d"], seq_len,drop_ppg=False, batch=None):  # noqa: F722
+        if ppg_embed is None:
+            ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim)).to(self.ppg_proj[0].weight.device)
+        else:
+            ppg_len = ppg_embed.shape[1]
+            ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
+            if drop_ppg:  # cfg for ppg
+                ppg_embed = torch.zeros_like(ppg_embed)
+        ppg_embed = self.ppg_proj(ppg_embed)
+        return ppg_embed
+
+
 # noised input audio and context mixing embedding
 
 
 class InputEmbedding(nn.Module):
-    def __init__(self, mel_dim, text_dim, out_dim):
+    def __init__(self, mel_dim, text_dim, out_dim, use_ppg):
         super().__init__()
-        self.proj = nn.Linear(mel_dim * 2 + text_dim, out_dim)
+        self.use_ppg = use_ppg
+        if use_ppg:
+            self.proj = nn.Linear(mel_dim * 2 + text_dim * 2, out_dim)
+        else:
+            self.proj = nn.Linear(mel_dim * 2 + text_dim, out_dim)
         self.conv_pos_embed = ConvPositionEmbedding(dim=out_dim)
 
-    def forward(self, x: float["b n d"], cond: float["b n d"], text_embed: float["b n d"], drop_audio_cond=False):  # noqa: F722
+    def forward(self, x: float["b n d"], cond: float["b n d"], text_embed: float["b n d"], ppg_embed=None, drop_audio_cond=False):  # noqa: F722
         if drop_audio_cond:  # cfg for cond audio
             cond = torch.zeros_like(cond)
-
-        x = self.proj(torch.cat((x, cond, text_embed), dim=-1))
+        if self.use_ppg:
+            x = self.proj(torch.cat((x, cond, text_embed, ppg_embed), dim=-1))
+        else:
+            x = self.proj(torch.cat((x, cond, text_embed), dim=-1))
         x = self.conv_pos_embed(x) + x
         return x
 
@@ -119,6 +168,7 @@ class DiT(nn.Module):
         pe_attn_head=None,
         long_skip_connection=False,
         checkpoint_activations=False,
+        ppg_config=dict(),
     ):
         super().__init__()
 
@@ -129,7 +179,12 @@ class DiT(nn.Module):
             text_num_embeds, text_dim, mask_padding=text_mask_padding, conv_layers=conv_layers
         )
         self.text_cond, self.text_uncond = None, None  # text cache
-        self.input_embed = InputEmbedding(mel_dim, text_dim, dim)
+        
+        self.use_ppg = ppg_config["use_ppg"]
+        if self.use_ppg:
+            self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
+        
+        self.input_embed = InputEmbedding(mel_dim, text_dim, dim, self.use_ppg)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
 
@@ -187,9 +242,11 @@ class DiT(nn.Module):
         x: float["b n d"],  # nosied input audio  # noqa: F722
         cond: float["b n d"],  # masked cond audio  # noqa: F722
         text: int["b nt"],  # text  # noqa: F722
+        ppg,
         time: float["b"] | float[""],  # time step  # noqa: F821 F722
         drop_audio_cond,  # cfg for cond audio
         drop_text,  # cfg for text
+        drop_ppg,
         mask: bool["b n"] | None = None,  # noqa: F722
         cache=False,
     ):
@@ -202,15 +259,22 @@ class DiT(nn.Module):
         if cache:
             if drop_text:
                 if self.text_uncond is None:
-                    self.text_uncond = self.text_embed(text, seq_len, drop_text=True)
+                    self.text_uncond = self.text_embed(text, batch, seq_len, drop_text=True)
                 text_embed = self.text_uncond
             else:
                 if self.text_cond is None:
-                    self.text_cond = self.text_embed(text, seq_len, drop_text=False)
+                    self.text_cond = self.text_embed(text, batch, seq_len, drop_text=False)
                 text_embed = self.text_cond
         else:
-            text_embed = self.text_embed(text, seq_len, drop_text=drop_text)
-        x = self.input_embed(x, cond, text_embed, drop_audio_cond=drop_audio_cond)
+            text_embed = self.text_embed(text, batch, seq_len, drop_text=drop_text)
+        
+        # TODO ppg 模态的输入和 drop ppg
+        if self.use_ppg:
+            ppg_embed = self.ppg_embed(ppg_embed=ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
+        else:
+            ppg_embed = None
+        
+        x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 
         rope = self.rotary_embed.forward_from_seq_len(seq_len)
 

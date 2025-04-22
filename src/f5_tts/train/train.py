@@ -13,6 +13,30 @@ from f5_tts.model.utils import get_tokenizer
 os.chdir(str(files("f5_tts").joinpath("../..")))  # change working directory to root of project (local editable)
 
 
+def parse_ppg_config(ppg_cfg):
+    transformer_ppg_config = dict(
+        use_ppg = True,
+        ppg_dim = ppg_cfg.dim
+    )
+    cfm_ppg_config = dict(
+        use_ppg = True,
+        combined_cond_drop_prob = ppg_cfg.combined_cond_drop_prob
+    )
+    trainer_ppg_config = dict(
+        use_ppg = True,
+        model_path = ppg_cfg.model_path,
+        config = ppg_cfg.config,
+        frame_length = ppg_cfg.frame_length,
+        mel_frame_shift = ppg_cfg.mel_frame_shift,
+        dim = ppg_cfg.dim,
+        output_type = ppg_cfg.output_type,
+        map_mix_ratio = ppg_cfg.map.map_mix_ratio,
+        global_phn_center_path = ppg_cfg.map.global_phn_center_path,
+        para_softmax_path = ppg_cfg.map.para_softmax_path
+    )
+    return transformer_ppg_config, cfm_ppg_config, trainer_ppg_config
+
+
 @hydra.main(version_base="1.3", config_path=str(files("f5_tts").joinpath("configs")), config_name=None)
 def main(model_cfg):
     model_cls = hydra.utils.get_class(f"f5_tts.model.{model_cfg.model.backbone}")
@@ -29,12 +53,26 @@ def main(model_cfg):
     else:
         tokenizer_path = model_cfg.model.tokenizer_path
     vocab_char_map, vocab_size = get_tokenizer(tokenizer_path, tokenizer)
+    
+    use_ppg = model_cfg.model.get("use_ppg", False)
+    if use_ppg:
+        transformer_ppg_config, cfm_ppg_config, trainer_ppg_config = parse_ppg_config(model_cfg.model.ppg_config)
+    else:
+        transformer_ppg_config = cfm_ppg_config = trainer_ppg_config = dict(use_ppg = False)
+
+    transformer = model_cls(
+        **model_arc,
+        text_num_embeds=vocab_size,
+        mel_dim=model_cfg.model.mel_spec.n_mel_channels,
+        ppg_config=transformer_ppg_config
+    )
 
     # set model
     model = CFM(
-        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=model_cfg.model.mel_spec.n_mel_channels),
+        transformer=transformer,
         mel_spec_kwargs=model_cfg.model.mel_spec,
         vocab_char_map=vocab_char_map,
+        ppg_config=cfm_ppg_config
     )
 
     # init trainer
@@ -63,9 +101,16 @@ def main(model_cfg):
         is_local_vocoder=model_cfg.model.vocoder.is_local,
         local_vocoder_path=model_cfg.model.vocoder.local_path,
         model_cfg_dict=OmegaConf.to_container(model_cfg, resolve=True),
+        ppg_config=trainer_ppg_config
     )
 
-    train_dataset = load_dataset(model_cfg.datasets.name, tokenizer, mel_spec_kwargs=model_cfg.model.mel_spec)
+    train_dataset = load_dataset(
+        model_cfg.datasets.name,
+        tokenizer,
+        mel_spec_kwargs=model_cfg.model.mel_spec,
+        use_ppg=use_ppg
+    )
+
     trainer.train(
         train_dataset,
         num_workers=model_cfg.datasets.num_workers,
