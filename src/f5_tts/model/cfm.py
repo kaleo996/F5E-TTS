@@ -46,7 +46,8 @@ class CFM(nn.Module):
         mel_spec_kwargs: dict = dict(),
         frac_lengths_mask: tuple[float, float] = (0.7, 1.0),
         vocab_char_map: dict[str:int] | None = None,
-        ppg_config=dict()
+        ppg_config=dict(),
+        cb_config=dict()
     ):
         super().__init__()
 
@@ -78,6 +79,8 @@ class CFM(nn.Module):
         self.use_ppg = ppg_config["use_ppg"]
         if self.use_ppg:
             self.combined_cond_drop_prob = ppg_config["combined_cond_drop_prob"]
+        
+        self.use_codebook = cb_config["use_codebook"]
 
     @property
     def device(self):
@@ -301,13 +304,20 @@ class CFM(nn.Module):
 
         # if want rigorously mask out padding, record in collate_fn in dataset.py, and pass in here
         # adding mask will use more memory, thus also need to adjust batchsampler with scaled down threshold for long sequences
-        pred = self.transformer(
+        output = self.transformer(
             x=φ, cond=cond, text=text, ppg=ppg, time=time,
-            drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg
+            drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg, use_codebook=self.use_codebook
         )
+        
+        if isinstance(output, tuple):
+            pred, extra_loss = output
+        else:
+            pred = output
+            extra_loss = 0
 
         # flow matching loss
         loss = F.mse_loss(pred, flow, reduction="none")
         loss = loss[rand_span_mask]
+        loss = loss.mean() + extra_loss
 
-        return loss.mean(), cond, pred
+        return loss, cond, pred

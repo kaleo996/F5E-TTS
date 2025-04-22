@@ -9,32 +9,9 @@ from omegaconf import OmegaConf
 from f5_tts.model import CFM, Trainer
 from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer
+from parse_cfg import parse_ppg_config, parse_codebook_config
 
 os.chdir(str(files("f5_tts").joinpath("../..")))  # change working directory to root of project (local editable)
-
-
-def parse_ppg_config(ppg_cfg):
-    transformer_ppg_config = dict(
-        use_ppg = True,
-        ppg_dim = ppg_cfg.dim
-    )
-    cfm_ppg_config = dict(
-        use_ppg = True,
-        combined_cond_drop_prob = ppg_cfg.combined_cond_drop_prob
-    )
-    trainer_ppg_config = dict(
-        use_ppg = True,
-        model_path = ppg_cfg.model_path,
-        config = ppg_cfg.config,
-        frame_length = ppg_cfg.frame_length,
-        mel_frame_shift = ppg_cfg.mel_frame_shift,
-        dim = ppg_cfg.dim,
-        output_type = ppg_cfg.output_type,
-        map_mix_ratio = ppg_cfg.map.map_mix_ratio,
-        global_phn_center_path = ppg_cfg.map.global_phn_center_path,
-        para_softmax_path = ppg_cfg.map.para_softmax_path
-    )
-    return transformer_ppg_config, cfm_ppg_config, trainer_ppg_config
 
 
 @hydra.main(version_base="1.3", config_path=str(files("f5_tts").joinpath("configs")), config_name=None)
@@ -60,11 +37,18 @@ def main(model_cfg):
     else:
         transformer_ppg_config = cfm_ppg_config = trainer_ppg_config = dict(use_ppg = False)
 
+    use_codebook = model_cfg.model.get("use_codebook", False)
+    if use_ppg and use_codebook:
+        transformer_cb_config, cfm_cb_config = parse_codebook_config(model_cfg.model.codebook_config)
+    else:
+        transformer_cb_config = cfm_cb_config = dict(use_codebook = False)
+
     transformer = model_cls(
         **model_arc,
         text_num_embeds=vocab_size,
         mel_dim=model_cfg.model.mel_spec.n_mel_channels,
-        ppg_config=transformer_ppg_config
+        ppg_config=transformer_ppg_config,
+        cb_config=transformer_cb_config
     )
 
     # set model
@@ -72,7 +56,8 @@ def main(model_cfg):
         transformer=transformer,
         mel_spec_kwargs=model_cfg.model.mel_spec,
         vocab_char_map=vocab_char_map,
-        ppg_config=cfm_ppg_config
+        ppg_config=cfm_ppg_config,
+        cb_config=cfm_cb_config
     )
 
     # init trainer

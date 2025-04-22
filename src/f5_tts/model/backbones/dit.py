@@ -14,6 +14,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from x_transformers.x_transformers import RotaryEmbedding
+from fairseq.modules import GumbelVectorQuantizer
 
 from f5_tts.model.modules import (
     TimestepEmbedding,
@@ -169,6 +170,7 @@ class DiT(nn.Module):
         long_skip_connection=False,
         checkpoint_activations=False,
         ppg_config=dict(),
+        cb_config=dict()
     ):
         super().__init__()
 
@@ -183,6 +185,12 @@ class DiT(nn.Module):
         self.use_ppg = ppg_config["use_ppg"]
         if self.use_ppg:
             self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
+            
+        self.use_codebook = cb_config["use_codebook"]
+        if self.use_codebook:
+            self.codebook_prob = cb_config["codebook_prob"]
+            self.codebook_loss_weight = cb_config["codebook_loss_weight"]
+            self.quantizer = self.get_codebook(cb_config, text_dim)
         
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim, self.use_ppg)
 
@@ -236,6 +244,40 @@ class DiT(nn.Module):
 
     def clear_cache(self):
         self.text_cond, self.text_uncond = None, None
+        
+    def get_codebook(self, cb_config, text_dim):
+        return GumbelVectorQuantizer(
+                dim = text_dim, # dim of txt and ppg after embeddings
+                num_vars = cb_config["num_vars"],
+                temp = (cb_config["temp_start"], cb_config["temp_stop"], cb_config["temp_decay"]),
+                groups = cb_config["groups"],
+                combine_groups = cb_config["combine_groups"],
+                vq_dim = text_dim, # dim of txt and ppg after vq
+                time_first = True,
+                weight_proj_depth = cb_config["weight_proj_depth"],
+                weight_proj_factor = cb_config["weight_proj_factor"]
+            )
+    
+    # quantize 10% of txt and ppg tokens
+    # text_embed: [b, nt, d], text_len: [b], ppg_embed: [b, n, d], ppg_len: [b]
+    def quantize(self, text_embed, ppg_embed, drop_text=False, drop_ppg=False):
+        cb_loss = 0
+        if not drop_text:
+            quantized_text = self.quantizer(text_embed) # quantized_text is a dict
+            text_rand_idx = torch.randperm(text_embed.size(1))[:int(text_embed.size(1) * self.codebook_prob)]
+            quantized_text_weight = quantized_text["x"].new_zeros(text_embed.size(1))
+            quantized_text_weight[text_rand_idx] = 1
+            text_embed = quantized_text_weight.unsqueeze(1) * quantized_text["x"] + (1 - quantized_text_weight).unsqueeze(1) * text_embed
+            cb_loss += (quantized_text["num_vars"] - quantized_text["prob_perplexity"]) / quantized_text["num_vars"]
+        if not drop_ppg:
+            quantized_ppg = self.quantizer(ppg_embed)
+            ppg_rand_idx = torch.randperm(ppg_embed.size(1))[:int(ppg_embed.size(1) * self.codebook_prob)]
+            quantized_ppg_weight = quantized_ppg["x"].new_zeros(ppg_embed.size(1))
+            quantized_ppg_weight[ppg_rand_idx] = 1
+            ppg_embed = quantized_ppg_weight.unsqueeze(1) * quantized_ppg["x"] + (1 - quantized_ppg_weight).unsqueeze(1) * ppg_embed
+            cb_loss += (quantized_ppg["num_vars"] - quantized_ppg["prob_perplexity"]) / quantized_ppg["num_vars"]
+        cb_loss *= self.codebook_loss_weight
+        return text_embed, ppg_embed, cb_loss
 
     def forward(
         self,
@@ -249,6 +291,7 @@ class DiT(nn.Module):
         drop_ppg,
         mask: bool["b n"] | None = None,  # noqa: F722
         cache=False,
+        use_codebook = False
     ):
         batch, seq_len = x.shape[0], x.shape[1]
         if time.ndim == 0:
@@ -267,12 +310,17 @@ class DiT(nn.Module):
                 text_embed = self.text_cond
         else:
             text_embed = self.text_embed(text, batch, seq_len, drop_text=drop_text)
-        
-        # TODO ppg 模态的输入和 drop ppg
+
         if self.use_ppg:
             ppg_embed = self.ppg_embed(ppg_embed=ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
         else:
             ppg_embed = None
+
+        extra_loss = 0
+        
+        if use_codebook:
+            text_embed, ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
+            extra_loss += cb_loss
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 
@@ -294,4 +342,7 @@ class DiT(nn.Module):
         x = self.norm_out(x, t)
         output = self.proj_out(x)
 
-        return output
+        if extra_loss > 0:
+            return output, extra_loss
+        else:
+            return output
