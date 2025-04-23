@@ -6,6 +6,16 @@ from einops import rearrange
 from collections import namedtuple
 
 
+# when using durpred, add padding between every two phoneme tokens to model the pause / blurry part between
+def intersperse(text, sep=" ") -> list[list[str]]:
+    output = []
+    for sentence in text:
+        interspersed_sentence = [sep] * (len(sentence) * 2 + 1)
+        interspersed_sentence[1::2] = sentence
+        output.append(interspersed_sentence)
+    return output
+
+
 def random_masking(mask, mask_prob):
     assert mask.ndim == 2
     lens = mask.shape[-1]
@@ -29,14 +39,6 @@ def get_mask_from_lengths(lengths, max_len=None, r=1, random_mask=0.):
         mask = mask.logical_and(random_masking(mask, random_mask))
     return mask
 
-
-def mle_loss(z, m, logs, mask, logdet=None):
-  l = torch.sum(logs) + 0.5 * torch.sum(torch.exp(-2 * logs) * ((z - m) ** 2)) # neg normal likelihood w/o the constant term
-  if logdet is not None:
-    l = l - torch.sum(logdet) # log jacobian determinant
-  l = l / torch.sum(torch.ones_like(z) * mask) # averaging across batch, channel and time axes
-  l = l + 0.5 * math.log(2 * math.pi) # add the remaining constant term
-  return l
 
 def duration_loss(logw, logw_, lengths):
   l = torch.sum((logw - logw_)**2) / torch.sum(lengths)

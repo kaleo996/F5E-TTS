@@ -39,3 +39,16 @@ def parse_codebook_config(codebook_cfg):
         use_codebook = True,
     )
     return transformer_codebook_config, cfm_codebook_config
+
+def parse_durpred_config(durpred_cfg):
+    transformer_durpred_config = dict(
+        use_durpred = True,
+        style_vector_dim = durpred_cfg.style_vector_dim,
+        filter_channels = durpred_cfg.filter_channels,
+        kernel_size = durpred_cfg.kernel_size,
+        dropout = durpred_cfg.dropout
+    )
+    cfm_codebook_config = dict(
+        use_durpred = True,
+    )
+    return transformer_durpred_config, cfm_codebook_config
