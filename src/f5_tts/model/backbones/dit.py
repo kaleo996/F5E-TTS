@@ -15,7 +15,6 @@ from torch import nn
 import torch.nn.functional as F
 
 from x_transformers.x_transformers import RotaryEmbedding
-from fairseq.modules import GumbelVectorQuantizer
 
 from f5_tts.model.modules import (
     TimestepEmbedding,
@@ -26,6 +25,7 @@ from f5_tts.model.modules import (
     PPGInputTranspose,
     precompute_freqs_cis,
     get_pos_embed_indices,
+    GumbelVectorQuantizer
 )
 
 from f5_tts.durpred import MelStyleEncoder, DurationPredictor, duration_loss
