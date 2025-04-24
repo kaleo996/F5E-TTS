@@ -281,13 +281,14 @@ class DiT(nn.Module):
         )
         return spk_encoder, durpred
     
+    # torch.nonzero is element-wise, so this func works much faster on CPU than on GPU
     def sparsify_durpred_attn(self, attn):
         batch, text, mel = attn.shape
         result = torch.zeros_like(attn)
         for i in range(batch):
             for j in range(text):
                 text_mel_align = attn[i, j] # for a text token, which mel frames are aligned to it, like [0, 0, 1, 1, 1, 0]
-                ones_indices = torch.nonzero(text_mel_align == 1).view(-1)
+                ones_indices = torch.nonzero(text_mel_align).view(-1)
                 # randomly select a 1 if there are any
                 if len(ones_indices) > 0:
                     random_index = ones_indices[torch.randint(len(ones_indices), (1,))]
@@ -311,7 +312,9 @@ class DiT(nn.Module):
         attn = generate_path(w_ceil.squeeze(1), attn_mask.transpose(1,2))
         
         if self.sparse_align:
+            attn = attn.cpu()
             attn = self.sparsify_durpred_attn(attn)
+            attn = attn.to(text_embed.device)
         text_embed = torch.matmul(attn.transpose(1, 2), text_embed)
         
         # clip text_embed to the same len as mel and ppg
@@ -348,7 +351,9 @@ class DiT(nn.Module):
         dur_loss = duration_loss(logw, logw_, text_len)
         
         if self.sparse_align:
+            attn = attn.cpu()
             attn = self.sparsify_durpred_attn(attn)
+            attn = attn.to(text_embed.device)
         text_embed = torch.matmul(attn.transpose(1, 2), text_embed)
         
         return text_embed, dur_loss
