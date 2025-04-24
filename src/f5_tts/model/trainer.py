@@ -54,7 +54,7 @@ class Trainer:
         model_cfg_dict: dict = dict(),  # training config
         ppg_config = dict()
     ):
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 
         if logger == "wandb" and not wandb.api.api_key:
             logger = None
