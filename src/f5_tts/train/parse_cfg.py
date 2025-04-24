@@ -46,7 +46,8 @@ def parse_durpred_config(durpred_cfg):
         style_vector_dim = durpred_cfg.style_vector_dim,
         filter_channels = durpred_cfg.filter_channels,
         kernel_size = durpred_cfg.kernel_size,
-        dropout = durpred_cfg.dropout
+        dropout = durpred_cfg.dropout,
+        sparse_align = durpred_cfg.get("sparse_align", False)
     )
     cfm_codebook_config = dict(
         use_durpred = True,

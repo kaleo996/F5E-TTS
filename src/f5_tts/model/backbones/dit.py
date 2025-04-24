@@ -201,6 +201,7 @@ class DiT(nn.Module):
         if self.use_durpred:
             self.style_vector_dim = durpred_config["style_vector_dim"]
             self.durpred_text_embed = nn.Linear(text_dim, mel_dim) # project text to mel_dim, so that monotonic alignment search can be performed
+            self.sparse_align = durpred_config["sparse_align"] # sparse alignment introduced in MegaTTS 3 https://github.com/bytedance/MegaTTS3
             self.spk_encoder, self.durpred = self.get_durpred(durpred_config, mel_dim, text_dim)
         
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim, self.use_ppg)
@@ -280,6 +281,19 @@ class DiT(nn.Module):
         )
         return spk_encoder, durpred
     
+    def sparsify_durpred_attn(self, attn):
+        batch, text, mel = attn.shape
+        result = torch.zeros_like(attn)
+        for i in range(batch):
+            for j in range(text):
+                text_mel_align = attn[i, j] # for a text token, which mel frames are aligned to it, like [0, 0, 1, 1, 1, 0]
+                ones_indices = torch.nonzero(text_mel_align == 1).view(-1)
+                # randomly select a 1 if there are any
+                if len(ones_indices) > 0:
+                    random_index = ones_indices[torch.randint(len(ones_indices), (1,))]
+                    result[i, j, random_index] = 1
+        return result
+    
     def infer_durpred(self, cond, spk_embed_mask, text_embed, text_len, seq_len):
         spk_embed = self.spk_encoder(cond, spk_embed_mask)
         text_mask = get_mask_from_lengths(text_len, max_len=seq_len)
@@ -295,6 +309,9 @@ class DiT(nn.Module):
         mel_seq_mask = sequence_mask(mel_lengths, mel_max_length).to(text_mask.dtype)
         attn_mask = text_mask.unsqueeze(1) * mel_seq_mask.unsqueeze(2)
         attn = generate_path(w_ceil.squeeze(1), attn_mask.transpose(1,2))
+        
+        if self.sparse_align:
+            attn = self.sparsify_durpred_attn(attn)
         text_embed = torch.matmul(attn.transpose(1, 2), text_embed)
         
         # clip text_embed to the same len as mel and ppg
@@ -329,6 +346,9 @@ class DiT(nn.Module):
         logw_ = torch.log(1e-8 + attn.sum(2)) * text_mask.unsqueeze(1)
         attn = attn.squeeze(1).transpose(1,2)
         dur_loss = duration_loss(logw, logw_, text_len)
+        
+        if self.sparse_align:
+            attn = self.sparsify_durpred_attn(attn)
         text_embed = torch.matmul(attn.transpose(1, 2), text_embed)
         
         return text_embed, dur_loss
