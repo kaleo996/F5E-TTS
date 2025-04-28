@@ -84,6 +84,7 @@ class CFM(nn.Module):
             self.combined_cond_drop_prob = ppg_config["combined_cond_drop_prob"]
         
         self.use_codebook = cb_config["use_codebook"]
+        self.use_align_loss = cb_config["use_align_loss"]
         
         self.use_durpred = durpred_config["use_durpred"]
 
@@ -130,7 +131,7 @@ class CFM(nn.Module):
         text_len = None
         if isinstance(text, list):
             if exists(self.vocab_char_map):
-                if self.use_durpred:
+                if self.use_durpred or self.use_align_loss:
                     text = intersperse(text)
                     text_len = torch.tensor([len(t) for t in text])
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
@@ -180,8 +181,6 @@ class CFM(nn.Module):
             mask = None
 
         # neural ode
-        # import ipdb; ipdb.set_trace()
-
         def fn(t, x):
             # at each step, conditioning is fixed
             # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
@@ -262,7 +261,7 @@ class CFM(nn.Module):
         mel = None
         if isinstance(text, list):
             if exists(self.vocab_char_map):
-                if self.use_durpred:
+                if self.use_durpred or self.use_align_loss:
                     text = intersperse(text)
                     text_len = torch.tensor([len(t) for t in text])
                     mel = inp
@@ -331,11 +330,10 @@ class CFM(nn.Module):
 
         # if want rigorously mask out padding, record in collate_fn in dataset.py, and pass in here
         # adding mask will use more memory, thus also need to adjust batchsampler with scaled down threshold for long sequences
-        # import ipdb; ipdb.set_trace()
         output = self.transformer(
             x=φ, cond=cond, text=text, ppg=ppg, time=time,
             drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg,
-            spk_embed_mask=spk_embed_mask, text_len=text_len, mel=mel, mel_mask=mask,
+            spk_embed_mask=spk_embed_mask, text_len=text_len, ppg_len=ppg_len, mel=mel, mel_mask=mask,
         )
         
         if isinstance(output, tuple):

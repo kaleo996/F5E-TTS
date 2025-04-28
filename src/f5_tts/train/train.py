@@ -41,7 +41,7 @@ def main(model_cfg):
     if use_ppg and use_codebook:
         transformer_cb_config, cfm_cb_config = parse_codebook_config(model_cfg.model.codebook_config)
     else:
-        transformer_cb_config = cfm_cb_config = dict(use_codebook = False)
+        transformer_cb_config = cfm_cb_config = dict(use_codebook = False, use_align_loss = False)
 
     use_durpred = model_cfg.model.get("use_durpred", False)
     if use_durpred:

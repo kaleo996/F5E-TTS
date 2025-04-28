@@ -192,10 +192,10 @@ class DiT(nn.Module):
             self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
             
         self.use_codebook = cb_config["use_codebook"]
+        self.use_align_loss = cb_config["use_align_loss"]
         if self.use_codebook:
             self.codebook_prob = cb_config["codebook_prob"]
             self.codebook_loss_weight = cb_config["codebook_loss_weight"]
-            self.use_align_loss = cb_config["use_align_loss"]
             self.quantizer = self.get_codebook(cb_config, text_dim)
         
         self.use_durpred = durpred_config["use_durpred"]
@@ -430,6 +430,7 @@ class DiT(nn.Module):
         mask: bool["b n"] | None = None,  # noqa: F722
         spk_embed_mask = None, # to get ref speech for speaker encoder of duration predictor
         text_len = None,  # text length
+        ppg_len = None,
         mel = None, # target mel used to train duration predictor
         mel_mask: bool["b n"] | None = None, # mask of target mel # noqa: F722
     ):
@@ -456,6 +457,9 @@ class DiT(nn.Module):
         if self.use_codebook:
             text_embed, ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
             extra_loss += cb_loss
+            # TODO use the corresponding txt and ppg token to calculate alignment loss
+            if self.use_align_loss:
+                pass
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 
