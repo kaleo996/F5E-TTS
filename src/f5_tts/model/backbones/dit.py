@@ -195,6 +195,7 @@ class DiT(nn.Module):
         if self.use_codebook:
             self.codebook_prob = cb_config["codebook_prob"]
             self.codebook_loss_weight = cb_config["codebook_loss_weight"]
+            self.use_align_loss = cb_config["use_align_loss"]
             self.quantizer = self.get_codebook(cb_config, text_dim)
         
         self.use_durpred = durpred_config["use_durpred"]

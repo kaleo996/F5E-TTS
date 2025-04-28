@@ -33,7 +33,8 @@ def parse_codebook_config(codebook_cfg):
         groups = codebook_cfg.groups,
         combine_groups = codebook_cfg.combine_groups,
         weight_proj_depth = codebook_cfg.weight_proj_depth,
-        weight_proj_factor = codebook_cfg.weight_proj_factor
+        weight_proj_factor = codebook_cfg.weight_proj_factor,
+        use_align_loss = codebook_cfg.get('use_align_loss', False),
     )
     cfm_codebook_config = dict(
         use_codebook = True,
