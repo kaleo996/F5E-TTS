@@ -192,11 +192,14 @@ class DiT(nn.Module):
             self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
             
         self.use_codebook = cb_config["use_codebook"]
-        self.use_align_loss = cb_config["use_align_loss"]
         if self.use_codebook:
             self.codebook_prob = cb_config["codebook_prob"]
             self.codebook_loss_weight = cb_config["codebook_loss_weight"]
             self.quantizer = self.get_codebook(cb_config, text_dim)
+        self.use_align_loss = cb_config["use_align_loss"]
+        if self.use_align_loss:
+            self.align_loss_weight = cb_config["align_loss_weight"]
+            self.text_embed_to_mel_dim = nn.Linear(text_dim, mel_dim) # project text to mel_dim to perform MAS
         
         self.use_durpred = durpred_config["use_durpred"]
         if self.use_durpred:
@@ -334,6 +337,136 @@ class DiT(nn.Module):
         
         return text_embed, dur_loss
     
+    # use MAS to align text and mel
+    def align_text_mel(self, text_embed, text_len, seq_len, mel, mel_mask):
+        text_mask = get_mask_from_lengths(text_len, max_len=seq_len)
+        text_mask = text_mask.to(text_embed.device)
+        text_embed_in_mel_dim = self.text_embed_to_mel_dim(text_embed)
+        
+        text_embed_t = text_embed_in_mel_dim.transpose(1, 2) # [b, d, nt]
+        mel_t = mel.transpose(1, 2) # [b, d, n]
+        with torch.no_grad():
+            s_p_sq_r = torch.ones_like(text_embed_t)
+            neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi)- torch.zeros_like(text_embed_t), [1], keepdim=True)
+            neg_cent2 = torch.einsum("bdt, bds -> bts", -0.5 * (mel_t**2), s_p_sq_r)
+            neg_cent3 = torch.einsum("bdt, bds -> bts", mel_t, (text_embed_t * s_p_sq_r))
+            neg_cent4 = torch.sum(-0.5 * (text_embed_t**2) * s_p_sq_r, [1], keepdim=True)  
+            neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+            
+            attn_mask = text_mask.unsqueeze(1) * mel_mask.unsqueeze(2)
+            attn = (monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach())
+
+        attn = attn.squeeze(1).transpose(1, 2)
+        return attn
+    
+    def calc_align_loss(self, attn, text_embed, text_len, ppg_embed, ppg_len, mel_mask):
+        batch_size, max_text_len, max_mel_len = attn.shape
+        device = attn.device
+        
+        text_embed = self.quantizer(text_embed)["x"]
+        ppg_embed = self.quantizer(ppg_embed)["x"]
+
+        # 生成每个样本的梅尔到 PPG 的对应下标
+        interp_list = []
+        for b in range(batch_size):
+            current_mel_len = mel_mask[b].sum().item()
+            current_ppg_len = ppg_len[b]
+            
+            m_values = torch.arange(current_mel_len, device=device)
+            p_values = (m_values.float() / (current_mel_len - 1)) * (current_ppg_len - 1)
+            
+            low = torch.floor(p_values).long()
+            high = low + 1
+            frac = p_values - low
+            
+            # 处理 high 超出 PPG 长度的情况
+            high = torch.clamp(high, max=current_ppg_len - 1)
+            low = torch.where(high >= current_ppg_len, current_ppg_len - 1, low)
+            frac = torch.where(high >= current_ppg_len, torch.tensor(0.0, device=device), frac)
+            
+            # 线性插值
+            interp_m = (1 - frac.unsqueeze(-1)) * ppg_embed[b, low] + frac.unsqueeze(-1) * ppg_embed[b, high]
+            
+            # 填充到最大梅尔长度
+            padded_interp = torch.zeros((max_mel_len, ppg_embed.size(2)), device=device)
+            padded_interp[:current_mel_len] = interp_m
+            interp_list.append(padded_interp)
+        
+        interp_m_batch = torch.stack(interp_list, dim=0)  # [batch_size, max_mel_len, ppg_dim]
+
+        # 计算每个文本 token 对应的 PPG 平均向量
+        sum_term = torch.einsum('btm,bmd->btd', attn.float(), interp_m_batch)
+        count_term = attn.sum(dim=2, keepdim=True).float().clamp(min=1e-8)
+        avg_ppg = sum_term / count_term
+
+        # 创建文本掩码，忽略 padding 部分
+        text_mask = torch.arange(max_text_len, device=device).unsqueeze(0) < text_len.unsqueeze(1).to(device)
+        text_mask = text_mask.unsqueeze(-1).float()
+
+        # 计算 L2 损失
+        loss = F.mse_loss(text_embed * text_mask, avg_ppg * text_mask, reduction='sum')
+        loss = loss / text_mask.sum()
+        loss *= self.align_loss_weight
+
+        return loss
+    
+    def calc_align_loss_vectorized(self, attn, text_embed, text_len, ppg_embed, ppg_len, mel_mask):
+        batch_size, max_text_len, max_mel_len = attn.shape
+        device = attn.device
+
+        text_embed = self.quantizer(text_embed)["x"]
+        ppg_embed = self.quantizer(ppg_embed)["x"]
+
+        # 构建 batch-wise 的梅尔谱时间步 [batch_size, max_mel_len]
+        m_values = torch.arange(max_mel_len, device=device).unsqueeze(0).expand(batch_size, -1)
+
+        # 获取当前 batch 中每条数据的 mel 长度 [batch_size]
+        mel_lengths = mel_mask.long().sum(dim=1)  # [batch_size]
+
+        # 构建归一化后的 PPG 时间索引 [batch_size, max_mel_len]
+        p_values = (m_values.float() / (mel_lengths.unsqueeze(1) - 1).clamp(min=1e-6)) * (ppg_len.unsqueeze(1) - 1)
+
+        # 分离整数部分与小数部分
+        low = torch.floor(p_values).long()
+        high = low + 1
+        frac = p_values - low
+
+        # clamp 超出范围的 high 和 low
+        high = torch.clamp(high, max=ppg_len.unsqueeze(1) - 1)
+        low = torch.where(high >= ppg_len.unsqueeze(1), ppg_len.unsqueeze(1) - 1, low)
+        frac = torch.where(high >= ppg_len.unsqueeze(1), torch.zeros_like(frac), frac)
+
+        # 批量 gather PPG embedding
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, max_mel_len)
+        low_indices = low
+        high_indices = high
+
+        # 提取对应的 PPG 特征
+        ppg_low = ppg_embed[batch_indices, low_indices]  # [batch_size, max_mel_len, ppg_dim]
+        ppg_high = ppg_embed[batch_indices, high_indices]
+
+        # 插值
+        interp_m_batch = (1 - frac.unsqueeze(-1)) * ppg_low + frac.unsqueeze(-1) * ppg_high  # [batch_size, max_mel_len, ppg_dim]
+
+        # mask 掉超出实际 mel length 的部分
+        interp_m_batch = interp_m_batch * mel_mask.unsqueeze(-1).float()
+
+        # 注意力加权平均
+        sum_term = torch.einsum('btm,bmd->btd', attn.float(), interp_m_batch)
+        count_term = attn.sum(dim=2, keepdim=True).float().clamp(min=1e-8)
+        avg_ppg = sum_term / count_term
+
+        # 创建文本掩码
+        text_mask = torch.arange(max_text_len, device=device).unsqueeze(0) < text_len.unsqueeze(1).to(device)
+        text_mask = text_mask.unsqueeze(-1).float()
+
+        # 计算 L2 损失
+        loss = F.mse_loss(text_embed * text_mask, avg_ppg * text_mask, reduction='sum')
+        loss = loss / text_mask.sum()
+        loss *= self.align_loss_weight
+
+        return loss
+
     # quantize 10% of txt and ppg tokens
     # text_embed: [b, nt, d], text_len: [b], ppg_embed: [b, n, d], ppg_len: [b]
     def quantize(self, text_embed, ppg_embed, drop_text=False, drop_ppg=False):
@@ -455,11 +588,16 @@ class DiT(nn.Module):
             extra_loss += dur_loss
         
         if self.use_codebook:
-            text_embed, ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
+            quantized_text_embed, quantized_ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
             extra_loss += cb_loss
-            # TODO use the corresponding txt and ppg token to calculate alignment loss
-            if self.use_align_loss:
-                pass
+            # use the corresponding txt and ppg token to calculate alignment loss
+            if not drop_text and not drop_ppg and self.use_align_loss:
+                attn = self.align_text_mel(text_embed, text_len, seq_len, mel, mel_mask)
+                # TODO find corresponding txt and ppg tokens according to attn, calculate alignment loss
+                align_loss = self.calc_align_loss_vectorized(attn, text_embed, text_len, ppg_embed, ppg_len, mel_mask)
+                extra_loss += align_loss
+            text_embed = quantized_text_embed
+            ppg_embed = quantized_ppg_embed
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 

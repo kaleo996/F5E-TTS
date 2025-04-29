@@ -23,6 +23,7 @@ def parse_ppg_config(ppg_cfg):
 
 def parse_codebook_config(codebook_cfg):
     use_align_loss = codebook_cfg.get('use_align_loss', False)
+    align_loss_weight = codebook_cfg.get('align_loss_weight', 0.0)
     transformer_codebook_config = dict(
         use_codebook = True,
         codebook_prob = codebook_cfg.codebook_prob,
@@ -36,6 +37,7 @@ def parse_codebook_config(codebook_cfg):
         weight_proj_depth = codebook_cfg.weight_proj_depth,
         weight_proj_factor = codebook_cfg.weight_proj_factor,
         use_align_loss = use_align_loss,
+        align_loss_weight = align_loss_weight
     )
     cfm_codebook_config = dict(
         use_codebook = True,
