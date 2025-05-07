@@ -10,6 +10,7 @@ d - dimension
 from __future__ import annotations
 
 import math
+import random
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -29,7 +30,7 @@ from f5_tts.model.modules import (
 )
 
 from f5_tts.durpred import MelStyleEncoder, DurationPredictor, duration_loss
-from f5_tts.durpred import sequence_mask, generate_path, get_mask_from_lengths
+from f5_tts.durpred import sequence_mask, generate_path, get_mask_from_lengths, list2tensor
 import f5_tts.durpred.monotonic_align as monotonic_align
 
 # Text embedding
@@ -203,6 +204,11 @@ class DiT(nn.Module):
             self.durpred_text_embed = nn.Linear(text_dim, mel_dim) # project text to mel_dim, so that monotonic alignment search can be performed
             self.sparse_align = durpred_config["sparse_align"] # sparse alignment introduced in MegaTTS 3 https://github.com/bytedance/MegaTTS3
             self.spk_encoder, self.durpred = self.get_durpred(durpred_config, mel_dim, text_dim)
+            self.use_mask_cond = durpred_config["use_mask_cond"]
+            self.use_mix_cond = durpred_config["use_mix_cond"]
+            if self.use_mask_cond or self.use_mix_cond:
+                assert self.use_ppg, "use_mask_cond and use_mix_cond in DiT requires both txt and ppg modality"
+            assert not (self.use_mask_cond and self.use_mix_cond), "use_mask_cond and use_mix_cond in DiT cannot be both true"
         
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim, self.use_ppg)
 
@@ -331,6 +337,8 @@ class DiT(nn.Module):
         text_mask = get_mask_from_lengths(text_len, max_len=seq_len)
         text_mask = text_mask.to(text_embed.device)
         logw = self.durpred(text_embed, text_mask.unsqueeze(-1), spk_embed)
+        w = torch.exp(logw.squeeze(1)) * text_mask
+        w_ceil = torch.ceil(w)
         durpred_text_embed = self.durpred_text_embed(text_embed)
         
         text_embed_t = durpred_text_embed.transpose(1, 2) # [b, d, nt]
@@ -356,7 +364,47 @@ class DiT(nn.Module):
             attn = attn.to(text_embed.device)
         text_embed = torch.matmul(attn.transpose(1, 2), text_embed)
         
-        return text_embed, dur_loss
+        return text_embed, w_ceil, dur_loss
+    
+    def mask_cond(self, text_embed, ppg_embed, w_ceil, ppg_len):
+        batch_size = text_embed.shape[0]
+        drop_positions  = [random.uniform(0.3, 0.7) for _ in range(batch_size)] # randomly generate batch_size nums between 0.3 and 0.7
+        text_len = w_ceil.sum(-1)
+        for i, drop_pos in enumerate(drop_positions):
+            this_text_len = text_len[i]
+            text_embed[i, :int(this_text_len * drop_pos)] = 0
+            this_ppg_len = ppg_len[i]
+            ppg_embed[i, int(this_ppg_len * (1 - drop_pos)):] = 0
+        return text_embed, ppg_embed
+    
+    def mix_cond(self, text_embed, ppg_embed, w_ceil, ppg_len, seq_len):
+        batch_size = text_embed.shape[0]
+        drop_positions = [random.uniform(0.3, 0.7) for _ in range(batch_size)]
+        text_len = w_ceil.sum(-1)
+        new_text_embeds = []
+        new_ppg_embeds = []
+        
+        for i, drop_pos in enumerate(drop_positions):
+            this_text_len = text_len[i]
+            this_ppg_len = ppg_len[i]
+            new_text_embed = torch.cat((text_embed[i, :int(this_text_len * drop_pos)], ppg_embed[i, int(this_ppg_len * (1 - drop_pos)):]), 0)
+            new_ppg_embed = torch.cat((ppg_embed[i, :int(this_ppg_len * (1 - drop_pos))], text_embed[i, int(this_text_len * drop_pos):]), 0)
+            new_text_embeds.append(new_text_embed)
+            new_ppg_embeds.append(new_ppg_embed)
+        text_embed = list2tensor(new_text_embeds)
+        ppg_embed = list2tensor(new_ppg_embeds)
+
+        if seq_len > text_embed.shape[1]:
+            text_embed = F.pad(text_embed, (0, 0, 0, seq_len - text_embed.shape[1]), value=0)
+        elif seq_len < text_embed.shape[1]:
+            text_embed = text_embed[:, :seq_len]
+        
+        if seq_len > ppg_embed.shape[1]:
+            ppg_embed = F.pad(ppg_embed, (0, 0, 0, seq_len - ppg_embed.shape[1]), value=0)
+        elif seq_len < ppg_embed.shape[1]:
+            ppg_embed = ppg_embed[:, :seq_len]
+        
+        return text_embed, ppg_embed
     
     # quantize 10% of txt and ppg tokens
     # text_embed: [b, nt, d], text_len: [b], ppg_embed: [b, n, d], ppg_len: [b]
@@ -454,6 +502,7 @@ class DiT(nn.Module):
         mask: bool["b n"] | None = None,  # noqa: F722
         spk_embed_mask = None, # to get ref speech for speaker encoder of duration predictor
         text_len = None,  # text length
+        ppg_len = None,
         mel = None, # target mel used to train duration predictor
         mel_mask: bool["b n"] | None = None, # mask of target mel # noqa: F722
     ):
@@ -473,9 +522,14 @@ class DiT(nn.Module):
 
         extra_loss = 0
 
-        if self.use_durpred and text is not None:
-            text_embed, dur_loss = self.train_durpred(cond, spk_embed_mask, text_embed, text_len, seq_len, mel, mel_mask)
+        if self.use_durpred and not drop_text:
+            text_embed, w_ceil, dur_loss = self.train_durpred(cond, spk_embed_mask, text_embed, text_len, seq_len, mel, mel_mask)
             extra_loss += dur_loss
+            if not drop_ppg:
+                if self.use_mask_cond:
+                    text_embed, ppg_embed = self.mask_cond(text_embed, ppg_embed, w_ceil, ppg_len)
+                elif self.use_mix_cond:
+                    text_embed, ppg_embed = self.mix_cond(text_embed, ppg_embed, w_ceil, ppg_len, seq_len)
         
         if self.use_codebook:
             text_embed, ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)

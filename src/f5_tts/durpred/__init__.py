@@ -1,2 +1,2 @@
 from f5_tts.durpred.durpred import MelStyleEncoder, DurationPredictor
-from f5_tts.durpred.utils import intersperse, sequence_mask, generate_path, get_mask_from_lengths, duration_loss
+from f5_tts.durpred.utils import intersperse, sequence_mask, generate_path, get_mask_from_lengths, list2tensor, duration_loss

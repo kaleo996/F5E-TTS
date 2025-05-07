@@ -335,7 +335,7 @@ class CFM(nn.Module):
         output = self.transformer(
             x=φ, cond=cond, text=text, ppg=ppg, time=time,
             drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg,
-            spk_embed_mask=spk_embed_mask, text_len=text_len, mel=mel, mel_mask=mask,
+            spk_embed_mask=spk_embed_mask, text_len=text_len, ppg_len=ppg_len, mel=mel, mel_mask=mask,
         )
         
         if isinstance(output, tuple):

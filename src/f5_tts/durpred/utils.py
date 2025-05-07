@@ -61,6 +61,18 @@ def get_mask_from_lengths(lengths, max_len=None, r=1, random_mask=0.):
     return mask
 
 
+# convert a list of tensors in different lens to a tensor of shape (batch_size, max_len, dim)
+def list2tensor(embeds):
+    max_len = max([e.shape[0] for e in embeds])
+    tensors = []
+    for e in embeds:
+        pad_len = max_len - e.shape[0]
+        if pad_len > 0:
+            e = F.pad(e, (0, 0, 0, pad_len), value=0)
+        tensors.append(e)
+    return torch.stack(tensors)
+
+
 def duration_loss(logw, logw_, lengths):
   l = torch.sum((logw - logw_)**2) / torch.sum(lengths)
   return l
