@@ -89,9 +89,42 @@ def list_str_to_idx(
     vocab_char_map: dict[str, int],  # {char: idx}
     padding_value=-1,
 ) -> int["b nt"]:  # noqa: F722
+    for t in text:
+        for c in t:
+            if c not in vocab_char_map.keys():
+                if c not in "[]/—\{\}":
+                    print(f"character '{c}' not found in vocab, skipping")
+                    continue
     list_idx_tensors = [torch.tensor([vocab_char_map.get(c, 0) for c in t]) for t in text]  # pinyin or char style
     text = pad_sequence(list_idx_tensors, padding_value=padding_value, batch_first=True)
     return text
+
+
+def get_g2p_mix_vocab():
+    _pad = '_'
+
+    # unstressed phoneme set
+    english_phone_set = ['AA', 'AE', 'AH', 'AO', 'AW', 'AX', 'AY', 'B', 'CH', 'D', 'DH', 'EH', 'ER', 'EY', 'F',
+                        'G', 'HH', 'IH', 'IY', 'JH', 'K', 'L', 'M', 'N', 'NG', 'OW', 'OY', 'P', 'R', 'S',
+                        'SH', 'T', 'TH', 'UH', 'UW', 'V', 'W', 'Y', 'Z', 'ZH']
+    mandarin_phone_set = ['a', 'b', 'c', 'ch', 'd', 'e', 'er', 'f',
+                        'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'ng', 'o', 'p', 'q',
+                        'r', 's', 'sh', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'zh']
+    punc_set = [',', '.', '?', '!', ' ', '(', ')', ';', ':', '-', '\'', '\"', '，', '。', '、', '？', '！', '：', '；', '（', '）', '“', '”', '‘', '’', '—']
+    unstressed_phone_set = [_pad] + mandarin_phone_set + english_phone_set + punc_set
+
+    # phoneme with tones
+    mandarin_finals = ['a', 'e', 'er', 'i', 'o', 'u', 'v', 'ng', 'n', 'm']
+    mandarin_tones = ['0', '1', '2', '3', '4', '5']
+    mandarin_tone_phones = [p + t for p in mandarin_finals for t in mandarin_tones] # Mandarin finals + tone
+    english_finals = ['AA', 'AE', 'AH', 'AO', 'AW', 'AX', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW', 'OY', 'UH', 'UW']
+    english_tones = ['0', '1', '2']
+    english_tone_phones = [p + t for p in english_finals for t in english_tones] # English vowels + accent
+
+    # final vocab for g2p-mix tokenizer
+    phone_set_with_tones = unstressed_phone_set + mandarin_tone_phones + english_tone_phones
+    tone_phone_to_id = {p : i for i, p in enumerate(phone_set_with_tones)} # convert phone to id
+    return tone_phone_to_id
 
 
 # Get tokenizer
@@ -125,6 +158,10 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
             vocab_char_map = {}
             for i, char in enumerate(f):
                 vocab_char_map[char[:-1]] = i
+        vocab_size = len(vocab_char_map)
+
+    elif tokenizer == "g2p-mix":
+        vocab_char_map = get_g2p_mix_vocab()
         vocab_size = len(vocab_char_map)
 
     return vocab_char_map, vocab_size
