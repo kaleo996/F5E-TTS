@@ -11,6 +11,7 @@ from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer
 from parse_cfg import parse_ppg_config, parse_codebook_config
 
+
 os.chdir(str(files("f5_tts").joinpath("../..")))  # change working directory to root of project (local editable)
 
 
