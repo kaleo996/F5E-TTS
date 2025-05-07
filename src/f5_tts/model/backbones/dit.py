@@ -26,6 +26,9 @@ from f5_tts.model.modules import (
     GumbelVectorQuantizer
 )
 
+from f5_tts.durpred import MelStyleEncoder, DurationPredictor, duration_loss
+from f5_tts.durpred import get_mask_from_lengths
+import f5_tts.durpred.monotonic_align as monotonic_align
 
 # Text embedding
 
@@ -169,7 +172,8 @@ class DiT(nn.Module):
         long_skip_connection=False,
         checkpoint_activations=False,
         ppg_config=dict(),
-        cb_config=dict()
+        cb_config=dict(),
+        durpred_config=dict(),
     ):
         super().__init__()
 
@@ -190,6 +194,12 @@ class DiT(nn.Module):
             self.codebook_prob = cb_config["codebook_prob"]
             self.codebook_loss_weight = cb_config["codebook_loss_weight"]
             self.quantizer = self.get_codebook(cb_config, text_dim)
+        
+        self.use_durpred = durpred_config["use_durpred"]
+        if self.use_durpred:
+            self.style_vector_dim = durpred_config.style_vector_dim
+            self.durpred_text_embed = nn.Linear(text_dim, mel_dim) # project text to mel_dim, so that monotonic alignment search can be performed
+            self.spk_encoder, self.durpred = self.get_durpred(durpred_config, mel_dim, text_dim)
         
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim, self.use_ppg)
 
@@ -257,6 +267,17 @@ class DiT(nn.Module):
                 weight_proj_factor = cb_config["weight_proj_factor"]
             )
     
+    def get_durpred(self, durpred_config, mel_dim, text_dim):
+        spk_encoder = MelStyleEncoder(n_mel_channels=mel_dim, style_vector_dim=self.style_vector_dim)
+        durpred = DurationPredictor(
+            in_channels = text_dim,
+            filter_channels = durpred_config.filter_channels,
+            kernel_size = durpred_config.kernel_size,
+            p_dropout = durpred_config.dropout,
+            style_vector_dim = self.style_vector_dim
+        )
+        return spk_encoder, durpred
+    
     # quantize 10% of txt and ppg tokens
     # text_embed: [b, nt, d], text_len: [b], ppg_embed: [b, n, d], ppg_len: [b]
     def quantize(self, text_embed, ppg_embed, drop_text=False, drop_ppg=False):
@@ -277,6 +298,67 @@ class DiT(nn.Module):
             cb_loss += (quantized_ppg["num_vars"] - quantized_ppg["prob_perplexity"]) / quantized_ppg["num_vars"]
         cb_loss *= self.codebook_loss_weight
         return text_embed, ppg_embed, cb_loss
+    
+    def sample(
+        self,
+        x: float["b n d"],  # nosied input audio  # noqa: F722
+        cond: float["b n d"],  # masked cond audio  # noqa: F722
+        text: int["b nt"],  # text  # noqa: F722
+        ppg,
+        time: float["b"] | float[""],  # time step  # noqa: F821 F722
+        drop_audio_cond,  # cfg for cond audio
+        drop_text,  # cfg for text
+        drop_ppg,
+        mask: bool["b n"] | None = None,  # noqa: F722
+    ):
+        batch, seq_len = x.shape[0], x.shape[1]
+        if time.ndim == 0:
+            time = time.repeat(batch)
+
+        # t: conditioning time, text: text, x: noised audio + cond audio + text
+        t = self.time_embed(time)
+        
+        # cache when inferring
+        if drop_text:
+            if self.text_uncond is None:
+                self.text_uncond = self.text_embed(text, batch, seq_len, drop_text=True)
+            text_embed = self.text_uncond
+        else:
+            if self.text_cond is None:
+                self.text_cond = self.text_embed(text, batch, seq_len, drop_text=False)
+            text_embed = self.text_cond
+
+
+        if self.use_ppg:
+            ppg_embed = self.ppg_embed(ppg_embed=ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
+        else:
+            ppg_embed = None
+
+        # TODO use durpred
+        if self.use_durpred and text is not None:
+            pass
+        
+        x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
+
+        rope = self.rotary_embed.forward_from_seq_len(seq_len)
+
+        if self.long_skip_connection is not None:
+            residual = x
+
+        for block in self.transformer_blocks:
+            if self.checkpoint_activations:
+                # https://pytorch.org/docs/stable/checkpoint.html#torch.utils.checkpoint.checkpoint
+                x = torch.utils.checkpoint.checkpoint(self.ckpt_wrapper(block), x, t, mask, rope, use_reentrant=False)
+            else:
+                x = block(x, t, mask=mask, rope=rope)
+
+        if self.long_skip_connection is not None:
+            x = self.long_skip_connection(torch.cat((x, residual), dim=-1))
+
+        x = self.norm_out(x, t)
+        pred = self.proj_out(x)
+
+        return pred
 
     def forward(
         self,
@@ -289,8 +371,6 @@ class DiT(nn.Module):
         drop_text,  # cfg for text
         drop_ppg,
         mask: bool["b n"] | None = None,  # noqa: F722
-        cache=False,
-        use_codebook = False
     ):
         batch, seq_len = x.shape[0], x.shape[1]
         if time.ndim == 0:
@@ -298,17 +378,8 @@ class DiT(nn.Module):
 
         # t: conditioning time, text: text, x: noised audio + cond audio + text
         t = self.time_embed(time)
-        if cache:
-            if drop_text:
-                if self.text_uncond is None:
-                    self.text_uncond = self.text_embed(text, batch, seq_len, drop_text=True)
-                text_embed = self.text_uncond
-            else:
-                if self.text_cond is None:
-                    self.text_cond = self.text_embed(text, batch, seq_len, drop_text=False)
-                text_embed = self.text_cond
-        else:
-            text_embed = self.text_embed(text, batch, seq_len, drop_text=drop_text)
+        
+        text_embed = self.text_embed(text, batch, seq_len, drop_text=drop_text)
 
         if self.use_ppg:
             ppg_embed = self.ppg_embed(ppg_embed=ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
@@ -317,7 +388,11 @@ class DiT(nn.Module):
 
         extra_loss = 0
         
-        if use_codebook:
+        # TODO use durpred
+        if self.use_durpred and text is not None:
+            pass
+        
+        if self.use_codebook:
             text_embed, ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
             extra_loss += cb_loss
         

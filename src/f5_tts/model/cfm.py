@@ -28,6 +28,8 @@ from f5_tts.model.utils import (
     mask_from_frac_lengths,
 )
 
+from f5_tts.durpred.utils import intersperse
+
 
 class CFM(nn.Module):
     def __init__(
@@ -47,7 +49,8 @@ class CFM(nn.Module):
         frac_lengths_mask: tuple[float, float] = (0.7, 1.0),
         vocab_char_map: dict[str:int] | None = None,
         ppg_config=dict(),
-        cb_config=dict()
+        cb_config=dict(),
+        durpred_config=dict(),
     ):
         super().__init__()
 
@@ -81,6 +84,8 @@ class CFM(nn.Module):
             self.combined_cond_drop_prob = ppg_config["combined_cond_drop_prob"]
         
         self.use_codebook = cb_config["use_codebook"]
+        
+        self.use_durpred = durpred_config["use_durpred"]
 
     @property
     def device(self):
@@ -172,16 +177,16 @@ class CFM(nn.Module):
             # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
 
             # predict flow
-            pred = self.transformer(
+            pred = self.transformer.sample(
                 x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
-                drop_audio_cond=False, drop_text=False, drop_ppg=False, cache=True
+                drop_audio_cond=False, drop_text=False, drop_ppg=False
             )
             if cfg_strength < 1e-5:
                 return pred
 
-            null_pred = self.transformer(
+            null_pred = self.transformer.sample(
                 x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
-                drop_audio_cond=True, drop_text=True, drop_ppg=True, cache=True
+                drop_audio_cond=True, drop_text=True, drop_ppg=True
             )
             return pred + (pred - null_pred) * cfg_strength
 
@@ -244,6 +249,8 @@ class CFM(nn.Module):
         # handle text as string
         if isinstance(text, list):
             if exists(self.vocab_char_map):
+                if self.use_durpred:
+                    text = intersperse(text)
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
             else:
                 text = list_str_to_tensor(text).to(device)
@@ -307,7 +314,7 @@ class CFM(nn.Module):
         # adding mask will use more memory, thus also need to adjust batchsampler with scaled down threshold for long sequences
         output = self.transformer(
             x=φ, cond=cond, text=text, ppg=ppg, time=time,
-            drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg, use_codebook=self.use_codebook
+            drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg
         )
         
         if isinstance(output, tuple):
