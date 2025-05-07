@@ -131,6 +131,57 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
     return vocab_char_map, vocab_size
 
 
+# convert char to finer pinyin
+# `convert_char_to_pinyin` treat the pronunciation of a chinese character as one token, e.g. ['xuan1']
+# but in this func, we split pinyin into one-character tokens like how F5-TTS treats English, e.g. ['x', 'u', 'ā', 'n']
+def convert_char_to_finer_pinyin(text_list, polyphone=True):
+    if jieba.dt.initialized is False:
+        jieba.default_logger.setLevel(50)  # CRITICAL
+        jieba.initialize()
+
+    final_text_list = []
+    custom_trans = str.maketrans(
+        {";": ",", "“": '"', "”": '"', "‘": "'", "’": "'"}
+    )  # add custom trans here, to address oov
+
+    def is_chinese(c):
+        return (
+            "\u3100" <= c <= "\u9fff"  # common chinese characters
+        )
+
+    for text in text_list:
+        char_list = []
+        text = text.translate(custom_trans)
+        for seg in jieba.cut(text):
+            seg_byte_len = len(bytes(seg, "UTF-8"))
+            if seg_byte_len == len(seg):  # if pure alphabets and symbols
+                if char_list and seg_byte_len > 1 and char_list[-1] not in " :'\"":
+                    char_list.append(" ")
+                char_list.extend(seg)
+            elif polyphone and seg_byte_len == 3 * len(seg):  # if pure east asian characters
+                seg_ = lazy_pinyin(seg, style=Style.TONE, tone_sandhi=True)
+                for i, c in enumerate(seg):
+                    if is_chinese(c):
+                        if char_list and char_list[-1] not in " :'\"":
+                            char_list.append(" ")
+                    char_list.extend([char for char in seg_[i]])
+            else:  # if mixed characters, alphabets and symbols
+                for c in seg:
+                    if ord(c) < 256:
+                        char_list.extend(c)
+                    elif is_chinese(c):
+                        if char_list and char_list[-1] not in " :'\"":
+                            char_list.append(" ")
+                        syllable = lazy_pinyin(c, style=Style.TONE, tone_sandhi=True)[0]
+                        pinyin_list = [char for char in syllable]
+                        char_list.extend(pinyin_list)
+                    else:
+                        char_list.append(c)
+        final_text_list.append(char_list)
+
+    return final_text_list
+
+
 # convert char to pinyin
 
 
