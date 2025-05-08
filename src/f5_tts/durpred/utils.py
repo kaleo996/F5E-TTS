@@ -7,7 +7,7 @@ from collections import namedtuple
 
 
 # when using durpred, add padding between every two phoneme tokens to model the pause / blurry part between
-def intersperse(text, sep=" ") -> list[list[str]]:
+def intersperse(text, sep="_") -> list[list[str]]:
     output = []
     for sentence in text:
         interspersed_sentence = [sep] * (len(sentence) * 2 + 1)

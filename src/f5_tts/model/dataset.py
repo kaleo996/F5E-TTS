@@ -93,6 +93,7 @@ class CustomDataset(Dataset):
         mel_spec_type="vocos",
         preprocessed_mel=False,
         mel_spec_module: nn.Module | None = None,
+        tokenizer=None,
         use_ppg=False
     ):
         self.data = custom_dataset
@@ -103,6 +104,7 @@ class CustomDataset(Dataset):
         self.win_length = win_length
         self.mel_spec_type = mel_spec_type
         self.preprocessed_mel = preprocessed_mel
+        self.tokenizer = tokenizer
         self.use_ppg = use_ppg
 
         if not preprocessed_mel:
@@ -117,7 +119,11 @@ class CustomDataset(Dataset):
                     mel_spec_type=mel_spec_type,
                 ),
             )
-            
+
+        if self.tokenizer == "g2p-mix":
+            from g2p_mix import G2pMix
+            self.g2p = G2pMix()
+        
         if use_ppg:
             self.featCal = kaldiFbank().eval()
 
@@ -136,13 +142,28 @@ class CustomDataset(Dataset):
             row = self.data[index]
             audio_path = row["audio_path"]
             text = row["text"]
+            
+            # filter if g2p-mix fail to generate phoneme
+            if self.tokenizer == "g2p-mix":
+                try:
+                    text = text.replace(" n't", "n't") # LibriTTS puts spaces before n't, but g2p-mix does n't
+                    g2p_list = self.g2p.g2p(text)
+                except Exception as e:
+                    print(f"Error occurred while g2p-mix processing text: {text}")
+                    index = (index + 1) % len(self.data)
+                    continue
+                # no extra space before 1st word, add a space before every following word's phoneme list unless it's a punctuation
+                text = [phone for phone in g2p_list[0].phones] + [phone for token in g2p_list[1:] for phone in (token.phones if token.lang=="SYM" else [" "] + token.phones)]
+            
             duration = row["duration"]
 
             # filter by given length
-            if 0.3 <= duration <= 30:
-                break  # valid
-
-            index = (index + 1) % len(self.data)
+            if duration < 0.3 or duration > 30:
+                print(f"Duration {duration} is out of range [0.3, 30]")
+                index = (index + 1) % len(self.data)
+                continue
+            
+            break  # valid
         
         data_item = dict(text=text)
 
@@ -294,6 +315,7 @@ def load_dataset(
             durations=durations,
             preprocessed_mel=preprocessed_mel,
             mel_spec_module=mel_spec_module,
+            tokenizer=tokenizer,
             use_ppg=use_ppg,
             **mel_spec_kwargs,
         )

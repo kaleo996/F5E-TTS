@@ -11,6 +11,7 @@ from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer
 from parse_cfg import parse_ppg_config, parse_codebook_config, parse_durpred_config
 
+
 os.chdir(str(files("f5_tts").joinpath("../..")))  # change working directory to root of project (local editable)
 
 
@@ -21,7 +22,8 @@ def main(model_cfg):
     tokenizer = model_cfg.model.tokenizer
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
 
-    exp_name = f"{model_cfg.model.name}_{mel_spec_type}_{model_cfg.model.tokenizer}_{model_cfg.datasets.name}"
+    method = model_cfg.ckpts.save_dir.split("/")[-1]
+    exp_name = f"{method}_{model_cfg.model.name}_{mel_spec_type}_{model_cfg.model.tokenizer}_{model_cfg.datasets.name}"
     wandb_resume_id = None
 
     # set text tokenizer

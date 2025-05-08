@@ -245,6 +245,7 @@ class CFM(nn.Module):
         lens: int["b"] | None = None,  # noqa: F821
         noise_scheduler: str | None = None,
     ):
+        ppg_len = None
         if ppg is not None and isinstance(ppg, list):
             ppg, ppg_len = ppg
         

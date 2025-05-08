@@ -5,11 +5,10 @@ import random
 from collections import defaultdict
 from importlib.resources import files
 
-import torch
-from torch.nn.utils.rnn import pad_sequence
-
 import jieba
-from pypinyin import lazy_pinyin, Style
+import torch
+from pypinyin import Style, lazy_pinyin
+from torch.nn.utils.rnn import pad_sequence
 
 
 # seed everything
@@ -90,9 +89,42 @@ def list_str_to_idx(
     vocab_char_map: dict[str, int],  # {char: idx}
     padding_value=-1,
 ) -> int["b nt"]:  # noqa: F722
+    for t in text:
+        for c in t:
+            if c not in vocab_char_map.keys():
+                if c not in "[]/—\{\}":
+                    print(f"character '{c}' not found in vocab, skipping")
+                    continue
     list_idx_tensors = [torch.tensor([vocab_char_map.get(c, 0) for c in t]) for t in text]  # pinyin or char style
     text = pad_sequence(list_idx_tensors, padding_value=padding_value, batch_first=True)
     return text
+
+
+def get_g2p_mix_vocab():
+    _pad = '_'
+
+    # unstressed phoneme set
+    english_phone_set = ['AA', 'AE', 'AH', 'AO', 'AW', 'AX', 'AY', 'B', 'CH', 'D', 'DH', 'EH', 'ER', 'EY', 'F',
+                        'G', 'HH', 'IH', 'IY', 'JH', 'K', 'L', 'M', 'N', 'NG', 'OW', 'OY', 'P', 'R', 'S',
+                        'SH', 'T', 'TH', 'UH', 'UW', 'V', 'W', 'Y', 'Z', 'ZH']
+    mandarin_phone_set = ['a', 'b', 'c', 'ch', 'd', 'e', 'er', 'f',
+                        'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'ng', 'o', 'p', 'q',
+                        'r', 's', 'sh', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'zh']
+    punc_set = [',', '.', '?', '!', ' ', '(', ')', ';', ':', '-', '\'', '\"', '，', '。', '、', '？', '！', '：', '；', '（', '）', '“', '”', '‘', '’', '—']
+    unstressed_phone_set = [_pad] + mandarin_phone_set + english_phone_set + punc_set
+
+    # phoneme with tones
+    mandarin_finals = ['a', 'e', 'er', 'i', 'o', 'u', 'v', 'ng', 'n', 'm']
+    mandarin_tones = ['0', '1', '2', '3', '4', '5']
+    mandarin_tone_phones = [p + t for p in mandarin_finals for t in mandarin_tones] # Mandarin finals + tone
+    english_finals = ['AA', 'AE', 'AH', 'AO', 'AW', 'AX', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW', 'OY', 'UH', 'UW']
+    english_tones = ['0', '1', '2']
+    english_tone_phones = [p + t for p in english_finals for t in english_tones] # English vowels + accent
+
+    # final vocab for g2p-mix tokenizer
+    phone_set_with_tones = unstressed_phone_set + mandarin_tone_phones + english_tone_phones
+    tone_phone_to_id = {p : i for i, p in enumerate(phone_set_with_tones)} # convert phone to id
+    return tone_phone_to_id
 
 
 # Get tokenizer
@@ -128,7 +160,62 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
                 vocab_char_map[char[:-1]] = i
         vocab_size = len(vocab_char_map)
 
+    elif tokenizer == "g2p-mix":
+        vocab_char_map = get_g2p_mix_vocab()
+        vocab_size = len(vocab_char_map)
+
     return vocab_char_map, vocab_size
+
+
+# convert char to finer pinyin
+# `convert_char_to_pinyin` treat the pronunciation of a chinese character as one token, e.g. ['xuan1']
+# but in this func, we split pinyin into one-character tokens like how F5-TTS treats English, e.g. ['x', 'u', 'ā', 'n']
+def convert_char_to_finer_pinyin(text_list, polyphone=True):
+    if jieba.dt.initialized is False:
+        jieba.default_logger.setLevel(50)  # CRITICAL
+        jieba.initialize()
+
+    final_text_list = []
+    custom_trans = str.maketrans(
+        {";": ",", "“": '"', "”": '"', "‘": "'", "’": "'"}
+    )  # add custom trans here, to address oov
+
+    def is_chinese(c):
+        return (
+            "\u3100" <= c <= "\u9fff"  # common chinese characters
+        )
+
+    for text in text_list:
+        char_list = []
+        text = text.translate(custom_trans)
+        for seg in jieba.cut(text):
+            seg_byte_len = len(bytes(seg, "UTF-8"))
+            if seg_byte_len == len(seg):  # if pure alphabets and symbols
+                if char_list and seg_byte_len > 1 and char_list[-1] not in " :'\"":
+                    char_list.append(" ")
+                char_list.extend(seg)
+            elif polyphone and seg_byte_len == 3 * len(seg):  # if pure east asian characters
+                seg_ = lazy_pinyin(seg, style=Style.TONE, tone_sandhi=True)
+                for i, c in enumerate(seg):
+                    if is_chinese(c):
+                        if char_list and char_list[-1] not in " :'\"":
+                            char_list.append(" ")
+                    char_list.extend([char for char in seg_[i]])
+            else:  # if mixed characters, alphabets and symbols
+                for c in seg:
+                    if ord(c) < 256:
+                        char_list.extend(c)
+                    elif is_chinese(c):
+                        if char_list and char_list[-1] not in " :'\"":
+                            char_list.append(" ")
+                        syllable = lazy_pinyin(c, style=Style.TONE, tone_sandhi=True)[0]
+                        pinyin_list = [char for char in syllable]
+                        char_list.extend(pinyin_list)
+                    else:
+                        char_list.append(c)
+        final_text_list.append(char_list)
+
+    return final_text_list
 
 
 # convert char to pinyin
