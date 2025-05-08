@@ -33,14 +33,16 @@ dependencies = [
     "soundfile",
     "tomli",
     "torch>=2.0.0",
-    "torchaudio==2.0.1",
+    "torchaudio>=2.0.0",
     "torchdiffeq",
     "tqdm>=4.65.0",
-    "transformers==4.39.3",
+    "transformers",
     "transformers_stream_generator",
     "vocos",
     "wandb",
     "x_transformers>=1.31.14",
+    "tensorboard",
+    "g2p-mix",
 ]
 
 [project.optional-dependencies]
