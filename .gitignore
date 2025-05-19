@@ -5,7 +5,8 @@ runs/
 data/
 ckpts/
 wandb/
-results/
+results
+pretrained_models
 configs/
 nohup_outputs/
 outputs
