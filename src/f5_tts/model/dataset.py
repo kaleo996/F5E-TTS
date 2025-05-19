@@ -136,8 +136,35 @@ class CustomDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+    
+    # 分割汉语韵母
+    def split_rime(self, rime):
+        # 最后一个字符应该是阿拉伯数字表示的声调
+        if not rime[-1].isdigit():
+            raise ValueError("The last character of rime should be a digit in {}".format(rime))
+        # 除了声调外，末尾两个字符如果是 er 或 ng，则和声调分一组
+        if len(rime) >= 3 and rime[-3:-1] in ["er", "ng"]:
+            last_group = rime[-3:]
+            rime = rime[:-3]
+        else: # 否则，末尾一个字符和声调分一组
+            last_group = rime[-2:]
+            rime = rime[:-2]
+        # 前面的一个字符一组
+        return [char for char in rime] + [last_group]
+
+    # 处理一个 token
+    def process_token(self, token):
+        phone_list = token.phones
+        # 如果是中文，需要把韵母分割到和 tokenizer 一样的粒度
+        if token.lang == "ZH":
+            phone_list = phone_list[:-1] + self.split_rime(phone_list[-1])
+        # 如果是数字，则拆成单个阿拉伯数字
+        if token.lang == "NUM":
+            phone_list = [char for char in phone_list[0]]
+        return phone_list
 
     def __getitem__(self, index):
+        # import ipdb; ipdb.set_trace()
         while True:
             row = self.data[index]
             audio_path = row["audio_path"]
@@ -148,12 +175,12 @@ class CustomDataset(Dataset):
                 try:
                     text = text.replace(" n't", "n't") # LibriTTS puts spaces before n't, but g2p-mix does n't
                     g2p_list = self.g2p.g2p(text)
+                    # no extra space before 1st word, add a space before every following word's phoneme list unless it's a punctuation
+                    text = [phone for phone in self.process_token(g2p_list[0])] + [phone for token in g2p_list[1:] for phone in (self.process_token(token) if token.lang=="SYM" else [" "] + self.process_token(token))]
                 except Exception as e:
                     print(f"Error occurred while g2p-mix processing text: {text}")
                     index = (index + 1) % len(self.data)
                     continue
-                # no extra space before 1st word, add a space before every following word's phoneme list unless it's a punctuation
-                text = [phone for phone in g2p_list[0].phones] + [phone for token in g2p_list[1:] for phone in (token.phones if token.lang=="SYM" else [" "] + token.phones)]
             
             duration = row["duration"]
 
