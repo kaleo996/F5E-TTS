@@ -1,5 +1,6 @@
 import math
 import os
+import re
 import random
 import string
 from pathlib import Path
@@ -7,12 +8,14 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 import torchaudio
+import librosa
 from tqdm import tqdm
 
 from f5_tts.eval.ecapa_tdnn import ECAPA_TDNN_SMALL
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import convert_char_to_pinyin
 
+from transformers import WhisperProcessor, WhisperForConditionalGeneration
 
 # seedtts testset metainfo: utt, prompt_text, prompt_wav, gt_text, gt_wav
 def get_seedtts_testset_metainfo(metalst):
@@ -367,6 +370,152 @@ def run_asr_wer(args):
                 "truth": raw_truth,
                 "hypo": raw_hypo,
                 "wer": wer,
+            }
+        )
+
+    return wer_results
+
+
+# two auxiliary functions for run_asr_wer_whisper_large_v3
+def number_to_words(n):
+    units = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    teens = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"]
+    tens = ["", "ten", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+
+    if n == 0:
+        return units[0]
+    words = []
+    # 处理百万
+    if n >= 1000000:
+        millions = n // 1000000
+        words.append(number_to_words(millions) + " million")
+        n %= 1000000
+    # 处理千位（递归）
+    if n >= 1000:
+        thousands = n // 1000
+        words.append(number_to_words(thousands) + " thousand")
+        n %= 1000
+        if 0 < n < 100:
+            words.append("and")
+    # 处理百位
+    if n >= 100:
+        hundreds = n // 100
+        words.append(units[hundreds] + " hundred")
+        n %= 100
+        if n > 0:
+            words.append("and")
+    # 处理十位和个位
+    if n >= 20:
+        words.append(tens[n // 10])
+        n %= 10
+    elif 10 <= n < 20:
+        words.append(teens[n - 10])
+        n = 0
+    if n > 0:
+        words.append(units[n])
+
+    return " ".join(words).replace(" and zero", "").replace("  ", " ")
+
+def replace_mixed_numbers(text):
+    # 分割字符串为数字和非数字部分
+    parts = re.findall(r'\d+|\D+', text)
+    converted = []
+    for part in parts:
+        if part.isdigit():
+            converted.append(number_to_words(int(part)))
+        else:
+            # 保留非数字部分（如字母、符号）
+            converted.append(part)
+    # 合并并标准化空格
+    return re.sub(r'\s+', ' ', ' '.join(converted)).strip()
+
+def replace_special(text):
+    if "$" in text:
+        text = text.replace("$", "")
+        text += "dollars" 
+    if "supercomputer" in text:
+        text = text.replace("supercomputer", "super computer")
+    if "18th" or "19th" in text:
+        text = text.replace("18th", "eighteenth").replace("19th", "nineteenth")
+    
+    return text
+
+
+# WER eval using whisper-karge-v3
+def run_asr_wer_whisper_large_v3(args, is_ellav=True):
+    rank, lang, test_set, ckpt_dir = args
+
+    if lang == "zh":
+        import zhconv
+
+        torch.cuda.set_device(rank)
+    elif lang == "en":
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
+    else:
+        raise NotImplementedError(
+            "lang support only 'zh' (funasr paraformer-zh), 'en' (whisper-large-v3), for now."
+        )
+    model_id = ckpt_dir
+    processor = WhisperProcessor.from_pretrained(model_id)
+    model = WhisperForConditionalGeneration.from_pretrained(model_id).to("cuda")
+    punctuation_all =  string.punctuation
+    wer_results = []
+
+    from jiwer import compute_measures,cer
+    # test_set = test_set[0]
+    # rank, test_set = test_set[0], test_set[1]
+    for gen_wav, prompt_wav, truth in tqdm(test_set):
+        if lang == "zh":
+            res = asr_model.generate(input=gen_wav, batch_size_s=300, disable_pbar=True)
+            hypo = res[0]["text"]
+            hypo = zhconv.convert(hypo, "zh-cn")
+        elif lang == "en":
+            wav, sr = librosa.load(gen_wav, sr=16000)
+            input_features = processor(
+                wav, sampling_rate=16000, return_tensors="pt"
+            ).input_features
+            input_features = input_features.to("cuda")
+            forced_decoder_ids = processor.get_decoder_prompt_ids(
+                language="english", task="transcribe"
+            )
+            predicted_ids = model.generate(
+                input_features, forced_decoder_ids=forced_decoder_ids
+            )
+            hypo = processor.batch_decode(
+                predicted_ids, skip_special_tokens=True
+            )[0]
+
+        raw_truth = truth
+        raw_hypo = hypo
+
+        for x in punctuation_all:
+            truth = truth.replace(x, "")
+            hypo = hypo.replace(x, "")
+        truth = truth.replace("’","")
+        hypo = hypo.replace("’","")
+        truth = truth.replace("  ", " ")
+        hypo = hypo.replace("  ", " ")
+        hypo = hypo.replace('-', ' ')
+        hypo = re.sub(r'[^\w\s\']', '', hypo)
+        if lang == "zh":
+            truth = " ".join([x for x in truth])
+            hypo = " ".join([x for x in hypo])
+        elif lang == "en":
+            truth = truth.lower()
+            hypo = hypo.lower()
+        hypo = replace_mixed_numbers(hypo)
+        hypo = replace_special(hypo)
+        measures = compute_measures(truth, hypo)
+        wer = measures["wer"]
+        cer_pred = cer(truth, hypo)
+
+        wer_results.append(
+            {
+                "wav": Path(gen_wav).stem,
+                "truth": raw_truth,
+                "hypo": raw_hypo,
+                "wer": wer,
+                "cer": cer_pred,
             }
         )
 

@@ -13,7 +13,7 @@ from importlib.resources import files
 
 import numpy as np
 
-from f5_tts.eval.utils_eval import get_librispeech_test, run_asr_wer, run_sim
+from f5_tts.eval.utils_eval import get_librispeech_test, run_asr_wer_whisper_large_v3, run_sim
 
 
 rel_path = str(files("f5_tts").joinpath("../../"))
@@ -24,7 +24,7 @@ def get_args():
     parser.add_argument("-e", "--eval_task", type=str, default="wer", choices=["sim", "wer"])
     parser.add_argument("-l", "--lang", type=str, default="en")
     parser.add_argument("-g", "--gen_wav_dir", type=str, required=True)
-    parser.add_argument("-p", "--librispeech_test_clean_path", type=str, required=True)
+    parser.add_argument("-p", "--librispeech_test_clean_path", type=str, default="/apdcephfs_cq10/share_1297902/user/nenali/project/chukewang/data/LibriSpeech/test-clean")
     parser.add_argument("-n", "--gpu_nums", type=int, default=8, help="Number of GPUs to use")
     parser.add_argument("--local", action="store_true", help="Use local custom checkpoint directory")
     return parser.parse_args()
@@ -47,7 +47,7 @@ def main():
 
     local = args.local
     if local:  # use local custom checkpoint dir
-        asr_ckpt_dir = "../checkpoints/Systran/faster-whisper-large-v3"
+        asr_ckpt_dir = "pretrained_models/whisper-large-v3"
     else:
         asr_ckpt_dir = ""  # auto download to cache dir
     wavlm_ckpt_dir = "../checkpoints/UniSpeech/wavlm_large_finetune.pth"
@@ -60,7 +60,7 @@ def main():
     if eval_task == "wer":
         with mp.Pool(processes=len(gpus)) as pool:
             args = [(rank, lang, sub_test_set, asr_ckpt_dir) for (rank, sub_test_set) in test_set]
-            results = pool.map(run_asr_wer, args)
+            results = pool.map(run_asr_wer_whisper_large_v3, args)
             for r in results:
                 full_results.extend(r)
     elif eval_task == "sim":
