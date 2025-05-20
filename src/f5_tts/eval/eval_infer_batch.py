@@ -23,6 +23,7 @@ from f5_tts.eval.utils_eval import (
 from f5_tts.infer.utils_infer import load_checkpoint, load_vocoder
 from f5_tts.model import CFM
 from f5_tts.model.utils import get_tokenizer
+from f5_tts.train.parse_cfg import parse_ppg_config, parse_codebook_config, parse_durpred_config
 
 
 accelerator = Accelerator()
@@ -67,12 +68,16 @@ def main():
     use_truth_duration = False
     no_ref_audio = False
 
-    model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/{exp_name}.yaml")))
+    model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/libritts_test_cfg/txt_ratio/{exp_name}.yaml")))
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
 
     dataset_name = model_cfg.datasets.name
     tokenizer = model_cfg.model.tokenizer
+    
+    if tokenizer == "g2p-mix":
+        from g2p_mix import G2pMix
+        g2p = G2pMix()
 
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
     target_sample_rate = model_cfg.model.mel_spec.target_sample_rate
@@ -81,9 +86,27 @@ def main():
     win_length = model_cfg.model.mel_spec.win_length
     n_fft = model_cfg.model.mel_spec.n_fft
 
+    use_ppg = model_cfg.model.get("use_ppg", False)
+    if use_ppg:
+        transformer_ppg_config, cfm_ppg_config, trainer_ppg_config = parse_ppg_config(model_cfg.model.ppg_config)
+    else:
+        transformer_ppg_config = cfm_ppg_config = trainer_ppg_config = dict(use_ppg = False)
+
+    use_codebook = model_cfg.model.get("use_codebook", False)
+    if use_ppg and use_codebook:
+        transformer_cb_config, cfm_cb_config = parse_codebook_config(model_cfg.model.codebook_config)
+    else:
+        transformer_cb_config = cfm_cb_config = dict(use_codebook = False)
+
+    use_durpred = model_cfg.model.get("use_durpred", False)
+    if use_durpred:
+        transformer_durpred_config, cfm_durpred_config = parse_durpred_config(model_cfg.model.durpred_config)
+    else:
+        transformer_durpred_config = cfm_durpred_config = dict(use_durpred = False)
+
     if testset == "ls_pc_test_clean":
         metalst = rel_path + "/data/librispeech_pc_test_clean_cross_sentence.lst"
-        librispeech_test_clean_path = "<SOME_PATH>/LibriSpeech/test-clean"  # test-clean path
+        librispeech_test_clean_path = "/apdcephfs_cq10/share_1297902/user/nenali/project/chukewang/data/LibriSpeech/test-clean"  # test-clean path
         metainfo = get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path)
 
     elif testset == "seedtts_test_zh":
@@ -121,19 +144,28 @@ def main():
     )
 
     # Vocoder model
-    local = False
+    local = True
     if mel_spec_type == "vocos":
-        vocoder_local_path = "../checkpoints/charactr/vocos-mel-24khz"
+        vocoder_local_path = "pretrained_models/vocos-mel-24khz"
     elif mel_spec_type == "bigvgan":
         vocoder_local_path = "../checkpoints/bigvgan_v2_24khz_100band_256x"
     vocoder = load_vocoder(vocoder_name=mel_spec_type, is_local=local, local_path=vocoder_local_path)
 
     # Tokenizer
     vocab_char_map, vocab_size = get_tokenizer(dataset_name, tokenizer)
+    
+    # TODO load PPG model according to trainer_ppg_config
 
     # Model
     model = CFM(
-        transformer=model_cls(**model_arc, text_num_embeds=vocab_size, mel_dim=n_mel_channels),
+        transformer=model_cls(
+            **model_arc,
+            text_num_embeds=vocab_size,
+            mel_dim=n_mel_channels,
+            ppg_config=transformer_ppg_config,
+            cb_config=transformer_cb_config,
+            durpred_config=transformer_durpred_config,
+        ),
         mel_spec_kwargs=dict(
             n_fft=n_fft,
             hop_length=hop_length,
@@ -146,6 +178,9 @@ def main():
             method=ode_method,
         ),
         vocab_char_map=vocab_char_map,
+        ppg_config=cfm_ppg_config,
+        cb_config=cfm_cb_config,
+        durpred_config=cfm_durpred_config,
     ).to(device)
 
     ckpt_path = rel_path + f"/ckpts/{exp_name}/model_{ckpt_step}.pt"
@@ -168,6 +203,11 @@ def main():
             ref_mels = ref_mels.to(device)
             ref_mel_lens = torch.tensor(ref_mel_lens, dtype=torch.long).to(device)
             total_mel_lens = torch.tensor(total_mel_lens, dtype=torch.long).to(device)
+            
+            if tokenizer == "g2p-mix":
+                g2p_list = g2p.g2p(final_text_list[0])
+                final_text_list = [phone for phone in g2p_list[0].phones] + [phone for token in g2p_list[1:] for phone in (token.phones if token.lang=="SYM" else [" "] + token.phones)]
+                final_text_list = [final_text_list]
 
             # Inference
             with torch.inference_mode():

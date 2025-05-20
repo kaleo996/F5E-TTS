@@ -48,9 +48,9 @@ class CFM(nn.Module):
         mel_spec_kwargs: dict = dict(),
         frac_lengths_mask: tuple[float, float] = (0.7, 1.0),
         vocab_char_map: dict[str:int] | None = None,
-        ppg_config=dict(),
-        cb_config=dict(),
-        durpred_config=dict(),
+        ppg_config=dict(use_ppg=False),
+        cb_config=dict(use_codebook=False),
+        durpred_config=dict(use_durpred=False),
     ):
         super().__init__()
 
@@ -97,8 +97,8 @@ class CFM(nn.Module):
         self,
         cond: float["b n d"] | float["b nw"],  # noqa: F722
         text: int["b nt"] | list[str],  # noqa: F722
-        ppg,
-        duration: int | int["b"],  # noqa: F821
+        ppg=None,
+        duration: int | int["b"]=None,  # noqa: F821
         *,
         lens: int["b"] | None = None,  # noqa: F821
         steps=32,

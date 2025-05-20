@@ -116,12 +116,14 @@ class PPGEmbedding(nn.Module):
         
     def forward(self, ppg_embed: None | float["b n d"], seq_len,drop_ppg=False, batch=None):  # noqa: F722
         if ppg_embed is None:
-            ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim)).to(self.ppg_proj[0].weight.device)
+            dtype = next(self.ppg_proj.parameters()).dtype
+            ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim), dtype=dtype).to(self.ppg_proj[0].weight.device)
         else:
             ppg_len = ppg_embed.shape[1]
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
             if drop_ppg:  # cfg for ppg
                 ppg_embed = torch.zeros_like(ppg_embed)
+        # import ipdb; ipdb.set_trace()
         ppg_embed = self.ppg_proj(ppg_embed)
         return ppg_embed
 
@@ -172,9 +174,9 @@ class DiT(nn.Module):
         pe_attn_head=None,
         long_skip_connection=False,
         checkpoint_activations=False,
-        ppg_config=dict(),
-        cb_config=dict(),
-        durpred_config=dict(),
+        ppg_config=dict(use_ppg=False),
+        cb_config=dict(use_codebook=False),
+        durpred_config=dict(use_durpred=False),
     ):
         super().__init__()
 

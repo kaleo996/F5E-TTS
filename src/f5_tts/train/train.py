@@ -22,8 +22,8 @@ def main(model_cfg):
     tokenizer = model_cfg.model.tokenizer
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
 
-    method = model_cfg.ckpts.save_dir.split("/")[-1]
-    exp_name = f"{method}_{model_cfg.model.name}_{mel_spec_type}_{model_cfg.model.tokenizer}_{model_cfg.datasets.name}"
+    log_label = "-".join(model_cfg.ckpts.save_dir.split("/")[1:])
+    exp_name = f"{log_label}_{model_cfg.model.name}_{mel_spec_type}_{model_cfg.model.tokenizer}_{model_cfg.datasets.name}"
     wandb_resume_id = None
 
     # set text tokenizer

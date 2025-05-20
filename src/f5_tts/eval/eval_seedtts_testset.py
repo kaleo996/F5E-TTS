@@ -13,7 +13,7 @@ from importlib.resources import files
 
 import numpy as np
 
-from f5_tts.eval.utils_eval import get_seed_tts_test, run_asr_wer, run_sim
+from f5_tts.eval.utils_eval import get_seed_tts_test, run_asr_wer_whisper_large_v3, run_sim
 
 
 rel_path = str(files("f5_tts").joinpath("../../"))
@@ -46,7 +46,7 @@ def main():
         if lang == "zh":
             asr_ckpt_dir = "../checkpoints/funasr"  # paraformer-zh dir under funasr
         elif lang == "en":
-            asr_ckpt_dir = "../checkpoints/Systran/faster-whisper-large-v3"
+            asr_ckpt_dir = "pretrained_models/whisper-large-v3"
     else:
         asr_ckpt_dir = ""  # auto download to cache dir
     wavlm_ckpt_dir = "../checkpoints/UniSpeech/wavlm_large_finetune.pth"
@@ -59,7 +59,7 @@ def main():
     if eval_task == "wer":
         with mp.Pool(processes=len(gpus)) as pool:
             args = [(rank, lang, sub_test_set, asr_ckpt_dir) for (rank, sub_test_set) in test_set]
-            results = pool.map(run_asr_wer, args)
+            results = pool.map(run_asr_wer_whisper_large_v3, args)
             for r in results:
                 full_results.extend(r)
     elif eval_task == "sim":
