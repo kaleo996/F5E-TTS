@@ -200,7 +200,6 @@ class DiT(nn.Module):
         self.use_align_loss = cb_config["use_align_loss"]
         if self.use_align_loss:
             self.align_loss_weight = cb_config["align_loss_weight"]
-            self.text_embed_to_mel_dim = nn.Linear(text_dim, mel_dim) # project text to mel_dim to perform MAS
         
         self.use_durpred = durpred_config["use_durpred"]
         if self.use_durpred:
