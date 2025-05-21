@@ -50,7 +50,6 @@ class CFM(nn.Module):
         vocab_char_map: dict[str:int] | None = None,
         ppg_config=dict(use_ppg=False),
         cb_config=dict(use_codebook=False),
-        durpred_config=dict(use_durpred=False),
     ):
         super().__init__()
 
@@ -85,8 +84,6 @@ class CFM(nn.Module):
         
         self.use_codebook = cb_config["use_codebook"]
         self.use_align_loss = cb_config["use_align_loss"]
-        
-        self.use_durpred = durpred_config["use_durpred"]
 
     @property
     def device(self):
@@ -128,12 +125,10 @@ class CFM(nn.Module):
 
         # text
 
-        text_len = None
         if isinstance(text, list):
             if exists(self.vocab_char_map):
-                if self.use_durpred or self.use_align_loss:
+                if self.use_align_loss:
                     text = intersperse(text)
-                    text_len = torch.tensor([len(t) for t in text])
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
             else:
                 text = list_str_to_tensor(text).to(device)
@@ -165,11 +160,7 @@ class CFM(nn.Module):
             cond = torch.zeros_like(cond)
 
         cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
-        
-        spk_embed_mask = None
-        if self.use_durpred:
-            spk_embed_mask = cond_mask
-        
+
         cond_mask = cond_mask.unsqueeze(-1)
         step_cond = torch.where(
             cond_mask, cond, torch.zeros_like(cond)
@@ -189,7 +180,6 @@ class CFM(nn.Module):
             pred = self.transformer.sample(
                 x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
                 drop_audio_cond=False, drop_text=False, drop_ppg=False,
-                spk_embed_mask=spk_embed_mask, text_len=text_len,
             )
             if cfg_strength < 1e-5:
                 return pred
@@ -197,7 +187,6 @@ class CFM(nn.Module):
             null_pred = self.transformer.sample(
                 x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
                 drop_audio_cond=True, drop_text=True, drop_ppg=True,
-                spk_embed_mask=spk_embed_mask, text_len=text_len,
             )
             return pred + (pred - null_pred) * cfg_strength
 
@@ -262,7 +251,7 @@ class CFM(nn.Module):
         mel = None
         if isinstance(text, list):
             if exists(self.vocab_char_map):
-                if self.use_durpred or self.use_align_loss:
+                if self.use_align_loss:
                     text = intersperse(text)
                     text_len = torch.tensor([len(t) for t in text])
                     mel = inp
@@ -280,10 +269,6 @@ class CFM(nn.Module):
         # get a random span to mask out for training conditionally
         frac_lengths = torch.zeros((batch,), device=self.device).float().uniform_(*self.frac_lengths_mask)
         rand_span_mask = mask_from_frac_lengths(lens, frac_lengths)
-        
-        spk_embed_mask = None
-        if self.use_durpred:
-            spk_embed_mask = (~rand_span_mask) & mask
 
         if exists(mask):
             rand_span_mask &= mask
@@ -334,7 +319,7 @@ class CFM(nn.Module):
         output = self.transformer(
             x=φ, cond=cond, text=text, ppg=ppg, time=time,
             drop_audio_cond=drop_audio_cond, drop_text=drop_text, drop_ppg=drop_ppg,
-            spk_embed_mask=spk_embed_mask, text_len=text_len, ppg_len=ppg_len, mel=mel, mel_mask=mask,
+            text_len=text_len, ppg_len=ppg_len
         )
         
         if isinstance(output, tuple):

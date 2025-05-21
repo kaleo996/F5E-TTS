@@ -27,8 +27,7 @@ from f5_tts.model.modules import (
     GumbelVectorQuantizer
 )
 
-from f5_tts.durpred import MelStyleEncoder, DurationPredictor, duration_loss
-from f5_tts.durpred import sequence_mask, generate_path, get_mask_from_lengths
+from f5_tts.durpred import get_mask_from_lengths
 import f5_tts.durpred.monotonic_align as monotonic_align
 
 # Text embedding
@@ -176,7 +175,6 @@ class DiT(nn.Module):
         checkpoint_activations=False,
         ppg_config=dict(use_ppg=False),
         cb_config=dict(use_codebook=False),
-        durpred_config=dict(use_durpred=False),
     ):
         super().__init__()
 
@@ -207,12 +205,6 @@ class DiT(nn.Module):
                 align_loss_cfg = cb_config["align_loss_config"]
                 self.align_loss_weight = align_loss_cfg["align_loss_weight"]
 
-        self.use_durpred = durpred_config["use_durpred"]
-        if self.use_durpred:
-            self.style_vector_dim = durpred_config["style_vector_dim"]
-            self.durpred_text_embed = nn.Linear(text_dim, mel_dim) # project text to mel_dim, so that monotonic alignment search can be performed
-            self.spk_encoder, self.durpred = self.get_durpred(durpred_config, mel_dim, text_dim)
-        
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim, self.use_ppg)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
@@ -278,70 +270,6 @@ class DiT(nn.Module):
                 weight_proj_depth = cb_config["weight_proj_depth"],
                 weight_proj_factor = cb_config["weight_proj_factor"]
             )
-    
-    def get_durpred(self, durpred_config, mel_dim, text_dim):
-        spk_encoder = MelStyleEncoder(n_mel_channels=mel_dim, style_vector_dim=self.style_vector_dim)
-        durpred = DurationPredictor(
-            in_channels = text_dim,
-            filter_channels = durpred_config["filter_channels"],
-            kernel_size = durpred_config["kernel_size"],
-            p_dropout = durpred_config["dropout"],
-            style_vector_dim = self.style_vector_dim
-        )
-        return spk_encoder, durpred
-    
-    def infer_durpred(self, cond, spk_embed_mask, text_embed, text_len, seq_len):
-        spk_embed = self.spk_encoder(cond, spk_embed_mask)
-        text_mask = get_mask_from_lengths(text_len, max_len=seq_len)
-        text_mask = text_mask.to(text_embed.device)
-        logw = self.durpred(text_embed, text_mask.unsqueeze(-1), spk_embed)
-        
-        w = torch.exp(logw.squeeze(1)) * text_mask
-        w_ceil = torch.ceil(w)
-        
-        mel_lengths = torch.clamp_min(torch.sum(w_ceil, 1), 1).long()
-        mel_max_length = mel_lengths.max()
-        # Using obtained durations `w` construct alignment map `attn`
-        mel_seq_mask = sequence_mask(mel_lengths, mel_max_length).to(text_mask.dtype)
-        attn_mask = text_mask.unsqueeze(1) * mel_seq_mask.unsqueeze(2)
-        attn = generate_path(w_ceil.squeeze(1), attn_mask.transpose(1,2))
-        text_embed = torch.matmul(attn.transpose(1, 2), text_embed)
-        
-        # clip text_embed to the same len as mel and ppg
-        text_embed_len = text_embed.size(1)
-        if text_embed_len > seq_len:
-            text_embed = text_embed[:, :seq_len, :]
-        elif text_embed_len < seq_len:
-            text_embed = F.pad(text_embed, (0, 0, 0, seq_len - text_embed_len))
-
-        return text_embed
-    
-    def train_durpred(self, cond, spk_embed_mask, text_embed, text_len, seq_len, mel, mel_mask):
-        spk_embed = self.spk_encoder(cond, spk_embed_mask)
-        text_mask = get_mask_from_lengths(text_len, max_len=seq_len)
-        text_mask = text_mask.to(text_embed.device)
-        logw = self.durpred(text_embed, text_mask.unsqueeze(-1), spk_embed)
-        durpred_text_embed = self.durpred_text_embed(text_embed)
-        
-        text_embed_t = durpred_text_embed.transpose(1, 2) # [b, d, nt]
-        mel_t = mel.transpose(1, 2) # [b, d, n]
-        with torch.no_grad():
-            s_p_sq_r = torch.ones_like(text_embed_t)
-            neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi)- torch.zeros_like(text_embed_t), [1], keepdim=True)
-            neg_cent2 = torch.einsum("bdt, bds -> bts", -0.5 * (mel_t**2), s_p_sq_r)
-            neg_cent3 = torch.einsum("bdt, bds -> bts", mel_t, (text_embed_t * s_p_sq_r))
-            neg_cent4 = torch.sum(-0.5 * (text_embed_t**2) * s_p_sq_r, [1], keepdim=True)  
-            neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
-            
-            attn_mask = text_mask.unsqueeze(1) * mel_mask.unsqueeze(2)
-            attn = (monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).unsqueeze(1).detach())
-    
-        logw_ = torch.log(1e-8 + attn.sum(2)) * text_mask.unsqueeze(1)
-        attn = attn.squeeze(1).transpose(1,2)
-        dur_loss = duration_loss(logw, logw_, text_len)
-        text_embed = torch.matmul(attn.transpose(1, 2), text_embed)
-        
-        return text_embed, dur_loss
     
     # use MAS to align text and ppg
     def align_text_ppg(self, text_embed, text_len, ppg_embed, ppg_len):
@@ -427,8 +355,6 @@ class DiT(nn.Module):
         drop_text,  # cfg for text
         drop_ppg,
         mask: bool["b n"] | None = None,  # noqa: F722
-        spk_embed_mask = None,
-        text_len = None,
     ):
         batch, seq_len = x.shape[0], x.shape[1]
         if time.ndim == 0:
@@ -453,9 +379,6 @@ class DiT(nn.Module):
         else:
             ppg_embed = None
 
-        if self.use_durpred and text is not None:
-            text_embed = self.infer_durpred(cond, spk_embed_mask, text_embed, text_len, seq_len)
-        
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 
         rope = self.rotary_embed.forward_from_seq_len(seq_len)
@@ -489,11 +412,8 @@ class DiT(nn.Module):
         drop_text,  # cfg for text
         drop_ppg,
         mask: bool["b n"] | None = None,  # noqa: F722
-        spk_embed_mask = None, # to get ref speech for speaker encoder of duration predictor
         text_len = None,  # text length
         ppg_len = None,
-        mel = None, # target mel used to train duration predictor
-        mel_mask: bool["b n"] | None = None, # mask of target mel # noqa: F722
     ):
         batch, seq_len = x.shape[0], x.shape[1]
         if time.ndim == 0:
@@ -511,10 +431,6 @@ class DiT(nn.Module):
 
         extra_loss = 0
 
-        if self.use_durpred and text is not None:
-            text_embed, dur_loss = self.train_durpred(cond, spk_embed_mask, text_embed, text_len, seq_len, mel, mel_mask)
-            extra_loss += dur_loss
-        
         if self.use_codebook:
             # alignment loss: find corresponding txt-ppg token pairs, measure the distance between two modalities
             if not drop_text and not drop_ppg and self.use_align_loss:
