@@ -194,13 +194,19 @@ class DiT(nn.Module):
             
         self.use_codebook = cb_config["use_codebook"]
         if self.use_codebook:
-            self.codebook_prob = cb_config["codebook_prob"]
-            self.codebook_loss_weight = cb_config["codebook_loss_weight"]
             self.quantizer = self.get_codebook(cb_config, text_dim)
-        self.use_align_loss = cb_config["use_align_loss"]
-        if self.use_align_loss:
-            self.align_loss_weight = cb_config["align_loss_weight"]
-        
+            
+            self.use_perplex_loss = cb_config.get("use_perplex_loss", False)
+            if self.use_perplex_loss:
+                perplex_loss_cfg = cb_config["perplex_loss_config"]
+                self.perplex_loss_prob = perplex_loss_cfg["perplex_loss_prob"]
+                self.perplex_loss_weight = perplex_loss_cfg["perplex_loss_weight"]
+            
+            self.use_align_loss = cb_config.get("use_align_loss", False)
+            if self.use_align_loss:
+                align_loss_cfg = cb_config["align_loss_config"]
+                self.align_loss_weight = align_loss_cfg["align_loss_weight"]
+
         self.use_durpred = durpred_config["use_durpred"]
         if self.use_durpred:
             self.style_vector_dim = durpred_config["style_vector_dim"]
@@ -365,7 +371,7 @@ class DiT(nn.Module):
         text_embed = self.quantizer(text_embed)["x"]
         ppg_embed = self.quantizer(ppg_embed)["x"]
 
-        batch, max_txt_len, dim = text_embed.shape
+        max_txt_len = text_embed.shape[1]
 
         # sum of PPG embeddings corresponding to each text token
         summed_ppg_embed = torch.bmm(attn, ppg_embed) # [batch, max_txt_len, max_ppg_len] @ [batch, max_ppg_len, dim] -> [batch, max_txt_len, dim]
@@ -388,24 +394,27 @@ class DiT(nn.Module):
 
     # quantize 10% of txt and ppg tokens
     # text_embed: [b, nt, d], text_len: [b], ppg_embed: [b, n, d], ppg_len: [b]
-    def quantize(self, text_embed, ppg_embed, drop_text=False, drop_ppg=False):
-        cb_loss = 0
+    def quantize_calc_perplex_loss(self, text_embed, ppg_embed, drop_text=False, drop_ppg=False):
+        perplex_loss = 0
+
         if not drop_text:
             quantized_text = self.quantizer(text_embed) # quantized_text is a dict
-            text_rand_idx = torch.randperm(text_embed.size(1))[:int(text_embed.size(1) * self.codebook_prob)]
+            text_rand_idx = torch.randperm(text_embed.size(1))[:int(text_embed.size(1) * self.perplex_loss_prob)]
             quantized_text_weight = quantized_text["x"].new_zeros(text_embed.size(1))
             quantized_text_weight[text_rand_idx] = 1
             text_embed = quantized_text_weight.unsqueeze(1) * quantized_text["x"] + (1 - quantized_text_weight).unsqueeze(1) * text_embed
-            cb_loss += (quantized_text["num_vars"] - quantized_text["prob_perplexity"]) / quantized_text["num_vars"]
+            perplex_loss += (quantized_text["num_vars"] - quantized_text["prob_perplexity"]) / quantized_text["num_vars"]
+
         if not drop_ppg:
             quantized_ppg = self.quantizer(ppg_embed)
-            ppg_rand_idx = torch.randperm(ppg_embed.size(1))[:int(ppg_embed.size(1) * self.codebook_prob)]
+            ppg_rand_idx = torch.randperm(ppg_embed.size(1))[:int(ppg_embed.size(1) * self.perplex_loss_prob)]
             quantized_ppg_weight = quantized_ppg["x"].new_zeros(ppg_embed.size(1))
             quantized_ppg_weight[ppg_rand_idx] = 1
             ppg_embed = quantized_ppg_weight.unsqueeze(1) * quantized_ppg["x"] + (1 - quantized_ppg_weight).unsqueeze(1) * ppg_embed
-            cb_loss += (quantized_ppg["num_vars"] - quantized_ppg["prob_perplexity"]) / quantized_ppg["num_vars"]
-        cb_loss *= self.codebook_loss_weight
-        return text_embed, ppg_embed, cb_loss
+            perplex_loss += (quantized_ppg["num_vars"] - quantized_ppg["prob_perplexity"]) / quantized_ppg["num_vars"]
+
+        perplex_loss *= self.perplex_loss_weight
+        return text_embed, ppg_embed, perplex_loss
     
     def sample(
         self,
@@ -507,15 +516,16 @@ class DiT(nn.Module):
             extra_loss += dur_loss
         
         if self.use_codebook:
-            quantized_text_embed, quantized_ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
-            extra_loss += cb_loss
-            # find corresponding txt-ppg token pairs to calculate alignment loss
+            # alignment loss: find corresponding txt-ppg token pairs, measure the distance between two modalities
             if not drop_text and not drop_ppg and self.use_align_loss:
                 attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
                 align_loss = self.calc_align_loss(attn, text_embed, text_len, ppg_embed)
                 extra_loss += align_loss
-            text_embed = quantized_text_embed
-            ppg_embed = quantized_ppg_embed
+
+            # perplexity loss: encourage codebook to use same group of quantized vectors for both txt and ppg modalities
+            if self.use_perplex_loss:
+                text_embed, ppg_embed, perplex_loss = self.quantize_calc_perplex_loss(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
+                extra_loss += perplex_loss
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 

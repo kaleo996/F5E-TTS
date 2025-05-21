@@ -22,12 +22,25 @@ def parse_ppg_config(ppg_cfg):
     return transformer_ppg_config, cfm_ppg_config, trainer_ppg_config
 
 def parse_codebook_config(codebook_cfg):
+    use_perplex_loss = codebook_cfg.get('use_perplex_loss', False)
+    if use_perplex_loss:
+        perplex_loss_config = dict(
+            perplex_loss_prob = codebook_cfg.perplex_loss_config.perplex_loss_prob,
+            perplex_loss_weight = codebook_cfg.perplex_loss_config.perplex_loss_weight
+        )
+    else:
+        perplex_loss_config = dict()
+    
     use_align_loss = codebook_cfg.get('use_align_loss', False)
-    align_loss_weight = codebook_cfg.get('align_loss_weight', 0.0)
+    if use_align_loss:
+        align_loss_config = dict(
+            align_loss_weight = codebook_cfg.align_loss_config.align_loss_weight
+        )
+    else:
+        align_loss_config = dict()
+
     transformer_codebook_config = dict(
         use_codebook = True,
-        codebook_prob = codebook_cfg.codebook_prob,
-        codebook_loss_weight = codebook_cfg.codebook_loss_weight,
         num_vars = codebook_cfg.num_vars,
         temp_start = codebook_cfg.temp_start,
         temp_stop = codebook_cfg.temp_stop,
@@ -36,13 +49,19 @@ def parse_codebook_config(codebook_cfg):
         combine_groups = codebook_cfg.combine_groups,
         weight_proj_depth = codebook_cfg.weight_proj_depth,
         weight_proj_factor = codebook_cfg.weight_proj_factor,
+
+        use_perplex_loss = use_perplex_loss,
+        perplex_loss_config = perplex_loss_config,
+
         use_align_loss = use_align_loss,
-        align_loss_weight = align_loss_weight
+        align_loss_config = align_loss_config
     )
+
     cfm_codebook_config = dict(
         use_codebook = True,
         use_align_loss = use_align_loss
     )
+
     return transformer_codebook_config, cfm_codebook_config
 
 def parse_durpred_config(durpred_cfg):
