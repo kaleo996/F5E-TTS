@@ -79,11 +79,12 @@ class CFM(nn.Module):
         self.vocab_char_map = vocab_char_map
         
         self.use_ppg = ppg_config["use_ppg"]
+        self.use_cross_mask = ppg_config.get("use_cross_mask", False)
         if self.use_ppg:
             self.combined_cond_drop_prob = ppg_config["combined_cond_drop_prob"]
         
         self.use_codebook = cb_config["use_codebook"]
-        self.use_align_loss = cb_config["use_align_loss"]
+        self.use_align_loss = cb_config.get("use_align_loss", False)
 
     @property
     def device(self):
@@ -127,7 +128,7 @@ class CFM(nn.Module):
 
         if isinstance(text, list):
             if exists(self.vocab_char_map):
-                if self.use_align_loss:
+                if self.use_align_loss or self.use_cross_mask:
                     text = intersperse(text)
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
             else:
@@ -248,13 +249,11 @@ class CFM(nn.Module):
 
         # handle text as string
         text_len = None
-        mel = None
         if isinstance(text, list):
             if exists(self.vocab_char_map):
-                if self.use_align_loss:
+                if self.use_align_loss or self.use_cross_mask:
                     text = intersperse(text)
-                    text_len = torch.tensor([len(t) for t in text])
-                    mel = inp
+                text_len = torch.tensor([len(t) for t in text])
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
             else:
                 text = list_str_to_tensor(text).to(device)

@@ -1,11 +1,13 @@
 def parse_ppg_config(ppg_cfg):
     transformer_ppg_config = dict(
         use_ppg = True,
-        ppg_dim = ppg_cfg.dim
+        ppg_dim = ppg_cfg.dim,
+        use_cross_mask = ppg_cfg.get("use_cross_mask", False)
     )
     cfm_ppg_config = dict(
         use_ppg = True,
-        combined_cond_drop_prob = ppg_cfg.combined_cond_drop_prob
+        combined_cond_drop_prob = ppg_cfg.combined_cond_drop_prob,
+        use_cross_mask = ppg_cfg.get("use_cross_mask", False)
     )
     trainer_ppg_config = dict(
         use_ppg = True,

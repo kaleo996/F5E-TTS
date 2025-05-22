@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import torch
+import random
 import torch.nn.functional as F
 from torch import nn
 from x_transformers.x_transformers import RotaryEmbedding
@@ -122,7 +123,6 @@ class PPGEmbedding(nn.Module):
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
             if drop_ppg:  # cfg for ppg
                 ppg_embed = torch.zeros_like(ppg_embed)
-        # import ipdb; ipdb.set_trace()
         ppg_embed = self.ppg_proj(ppg_embed)
         return ppg_embed
 
@@ -189,6 +189,7 @@ class DiT(nn.Module):
         self.use_ppg = ppg_config["use_ppg"]
         if self.use_ppg:
             self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
+            self.use_cross_mask = ppg_config.get("use_cross_mask", False)
             
         self.use_codebook = cb_config["use_codebook"]
         if self.use_codebook:
@@ -344,6 +345,39 @@ class DiT(nn.Module):
         perplex_loss *= self.perplex_loss_weight
         return text_embed, ppg_embed, perplex_loss
     
+    def cross_mask(self, attn, text_embed, text_len, ppg_embed, ppg_len):
+        device = text_embed.device
+        batch, max_text_len, _ = text_embed.shape
+        _, max_ppg_len, _ = ppg_embed.shape
+
+        text_valid_mask = get_mask_from_lengths(text_len, max_len=max_text_len).to(device) # [batch, max_text_len]
+        ppg_valid_mask = get_mask_from_lengths(ppg_len, max_len=max_ppg_len).to(device)
+
+        # for each sample, randomly mask 30% ~ 70% valid text token
+        text_mask = torch.ones(batch, max_text_len, dtype=torch.bool, device=device)
+        mask_ratio = 0.3 + 0.4 * torch.rand(batch, device=device)  # [batch,]
+        text_len = text_len.to(device)
+        mask_nums = (mask_ratio * text_len).long().clamp(min=0)
+        for b in range(batch):
+            this_text_len = text_len[b].item()
+            mask_num = mask_nums[b].item()
+            indices = torch.randperm(this_text_len, device=device) # randomly select mask indices
+            mask_indices = indices[:mask_num]
+            text_mask[b, mask_indices] = False
+
+        text_mask &= text_valid_mask # [batch, max_text_len], also mask paddings after valid text tokens
+
+        # generate PPG mask corresponding to text mask
+        ppg_to_text = attn.argmax(dim=1)  # [batch, max_ppg_len], which text token each PPG token corresponds to
+        ppg_mask = text_mask.gather(1, ppg_to_text)  # [batch, max_ppg_len]
+        ppg_mask = ~ppg_mask  # if the corresponding text token is reserved, then the PPG token is masked
+        ppg_mask &= ppg_valid_mask
+
+        masked_text_embed = text_embed.masked_fill(~text_mask.unsqueeze(-1), 0)
+        masked_ppg_embed = ppg_embed.masked_fill(~ppg_mask.unsqueeze(-1), 0)
+
+        return masked_text_embed, masked_ppg_embed
+    
     def sample(
         self,
         x: float["b n d"],  # nosied input audio  # noqa: F722
@@ -430,10 +464,11 @@ class DiT(nn.Module):
             ppg_embed = None
 
         extra_loss = 0
+        use_both_modal = not drop_text and not drop_ppg
 
         if self.use_codebook:
             # alignment loss: find corresponding txt-ppg token pairs, measure the distance between two modalities
-            if not drop_text and not drop_ppg and self.use_align_loss:
+            if self.use_align_loss and use_both_modal:
                 attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
                 align_loss = self.calc_align_loss(attn, text_embed, text_len, ppg_embed)
                 extra_loss += align_loss
@@ -442,6 +477,10 @@ class DiT(nn.Module):
             if self.use_perplex_loss:
                 text_embed, ppg_embed, perplex_loss = self.quantize_calc_perplex_loss(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
                 extra_loss += perplex_loss
+        
+        if self.use_cross_mask and use_both_modal:
+            attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
+            text_embed, ppg_embed = self.cross_mask(attn, text_embed, text_len, ppg_embed, ppg_len)
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 
