@@ -92,16 +92,16 @@ class CFM(nn.Module):
         return next(self.parameters()).device
 
     @torch.no_grad()
-    def sample(
+    def sample_tts(
         self,
         cond: float["b n d"] | float["b nw"],  # noqa: F722
         text: int["b nt"] | list[str],  # noqa: F722
-        ppg=None,
         duration: int | int["b"]=None,  # noqa: F821
         *,
         lens: int["b"] | None = None,  # noqa: F821
         steps=32,
-        cfg_strength=1.0,
+        alpha_spk=1.0,
+        alpha_txt=1.0,
         sway_sampling_coef=None,
         seed: int | None = None,
         max_duration=4096,
@@ -126,7 +126,6 @@ class CFM(nn.Module):
             lens = torch.full((batch,), cond_seq_len, device=device, dtype=torch.long)
 
         # text
-
         if isinstance(text, list):
             if exists(self.vocab_char_map):
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
@@ -135,7 +134,6 @@ class CFM(nn.Module):
             assert text.shape[0] == batch
 
         # duration
-
         cond_mask = lens_to_mask(lens)
         if edit_mask is not None:
             cond_mask = cond_mask & edit_mask
@@ -143,11 +141,8 @@ class CFM(nn.Module):
         if isinstance(duration, int):
             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
 
-        # duration at least text/audio prompt length plus one token, so something is generated
-        if text is not None:
-            duration = torch.maximum(torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration)
-        else:
-            duration = torch.maximum(lens + 1, duration)
+        # duration at least text prompt length plus one token, so something is generated
+        duration = torch.maximum(torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration)
         duration = duration.clamp(max=max_duration)
         max_duration = duration.amax()
 
@@ -170,25 +165,148 @@ class CFM(nn.Module):
         else:  # save memory and speed up, as single inference need no mask currently
             mask = None
 
-        # neural ode
-
+        # neural ode for TTS task
         def fn(t, x):
-            # at each step, conditioning is fixed
-            # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
-
             # predict flow
-            pred = self.transformer.sample(
-                x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
-                drop_audio_cond=False, drop_text=False, drop_ppg=False
-            )
-            if cfg_strength < 1e-5:
-                return pred
-
-            null_pred = self.transformer.sample(
-                x=x, cond=step_cond, text=text, ppg=ppg, time=t, mask=mask,
+            null_flow = self.transformer.sample(
+                x=x, cond=step_cond, text=text, ppg=None, time=t, mask=mask,
                 drop_audio_cond=True, drop_text=True, drop_ppg=True
             )
-            return pred + (pred - null_pred) * cfg_strength
+            
+            txt_flow = self.transformer.sample(
+                x=x, cond=step_cond, text=text, ppg=None, time=t, mask=mask,
+                drop_audio_cond=True, drop_text=False, drop_ppg=True
+            )
+            
+            spk_txt_flow = self.transformer.sample(
+                x=x, cond=step_cond, text=text, ppg=None, time=t, mask=mask,
+                drop_audio_cond=False, drop_text=False, drop_ppg=True
+            )
+            
+            final_tts_flow = alpha_spk * (spk_txt_flow - txt_flow) + alpha_txt * (txt_flow - null_flow) + null_flow
+            return final_tts_flow
+
+        # noise input
+        # to make sure batch inference result is same with different batch size, and for sure single inference
+        # still some difference maybe due to convolutional layers
+        y0 = []
+        for dur in duration:
+            if exists(seed):
+                torch.manual_seed(seed)
+            y0.append(torch.randn(dur, self.num_channels, device=self.device, dtype=step_cond.dtype))
+        y0 = pad_sequence(y0, padding_value=0, batch_first=True)
+
+        t_start = 0
+
+        # duplicate test corner for inner time step oberservation
+        if duplicate_test:
+            t_start = t_inter
+            y0 = (1 - t_start) * y0 + t_start * test_cond
+            steps = int(steps * (1 - t_start))
+
+        t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=step_cond.dtype)
+        if sway_sampling_coef is not None:
+            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+
+        trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
+        self.transformer.clear_cache()
+
+        sampled = trajectory[-1]
+        out = sampled
+        out = torch.where(cond_mask, cond, out)
+
+        if exists(vocoder):
+            out = out.permute(0, 2, 1)
+            out = vocoder(out)
+
+        return out, trajectory
+    
+    @torch.no_grad()
+    def sample_vc(
+        self,
+        cond: float["b n d"] | float["b nw"],  # noqa: F722
+        ppg=None,
+        duration: int | int["b"]=None,  # noqa: F821
+        *,
+        lens: int["b"] | None = None,  # noqa: F821
+        steps=32,
+        alpha_spk=1.0,
+        alpha_ppg=1.0,
+        sway_sampling_coef=None,
+        seed: int | None = None,
+        max_duration=4096,
+        vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,  # noqa: F722
+        no_ref_audio=False,
+        duplicate_test=False,
+        t_inter=0.1,
+        edit_mask=None,
+    ):
+        self.eval()
+        # raw wave
+
+        if cond.ndim == 2:
+            cond = self.mel_spec(cond)
+            cond = cond.permute(0, 2, 1)
+            assert cond.shape[-1] == self.num_channels
+
+        cond = cond.to(next(self.parameters()).dtype)
+
+        batch, cond_seq_len, device = *cond.shape[:2], cond.device
+        if not exists(lens):
+            lens = torch.full((batch,), cond_seq_len, device=device, dtype=torch.long)
+
+        # duration
+        cond_mask = lens_to_mask(lens)
+        if edit_mask is not None:
+            cond_mask = cond_mask & edit_mask
+
+        if isinstance(duration, int):
+            duration = torch.full((batch,), duration, device=device, dtype=torch.long)
+
+        # duration at least audio prompt length plus one token, so something is generated
+        duration = torch.maximum(lens + 1, duration)
+        duration = duration.clamp(max=max_duration)
+        max_duration = duration.amax()
+
+        # duplicate test corner for inner time step oberservation
+        if duplicate_test:
+            test_cond = F.pad(cond, (0, 0, cond_seq_len, max_duration - 2 * cond_seq_len), value=0.0)
+
+        cond = F.pad(cond, (0, 0, 0, max_duration - cond_seq_len), value=0.0)
+        if no_ref_audio:
+            cond = torch.zeros_like(cond)
+
+        cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
+        cond_mask = cond_mask.unsqueeze(-1)
+        step_cond = torch.where(
+            cond_mask, cond, torch.zeros_like(cond)
+        )  # allow direct control (cut cond audio) with lens passed in
+
+        if batch > 1:
+            mask = lens_to_mask(duration)
+        else:  # save memory and speed up, as single inference need no mask currently
+            mask = None
+
+        # neural ode for VC task
+        def fn(t, x):
+            # predict flow
+            null_flow = self.transformer.sample(
+                x=x, cond=step_cond, text=None, ppg=ppg, time=t, mask=mask,
+                drop_audio_cond=True, drop_text=True, drop_ppg=True
+            )
+            
+            ppg_flow = self.transformer.sample(
+                x=x, cond=step_cond, text=None, ppg=ppg, time=t, mask=mask,
+                drop_audio_cond=True, drop_text=True, drop_ppg=False
+            )
+            
+            spk_ppg_flow = self.transformer.sample(
+                x=x, cond=step_cond, text=None, ppg=ppg, time=t, mask=mask,
+                drop_audio_cond=False, drop_text=True, drop_ppg=False
+            )
+            
+            final_vc_flow = alpha_spk * (spk_ppg_flow - ppg_flow) + alpha_ppg * (ppg_flow - null_flow) + null_flow
+            return final_vc_flow
 
         # noise input
         # to make sure batch inference result is same with different batch size, and for sure single inference

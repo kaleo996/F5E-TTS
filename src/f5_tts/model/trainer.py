@@ -433,52 +433,35 @@ class Trainer:
                             valid_ppg = ppg[0, :ppg_lengths[0], :]
                             infer_ppg = torch.cat([valid_ppg, valid_ppg]).unsqueeze(0)
                             with torch.inference_mode():
-                                generated_txt_ppg, _ = self.accelerator.unwrap_model(self.model).sample(
+                                generated_ppg, _ = self.accelerator.unwrap_model(self.model).sample_vc(
                                     cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
-                                    text=infer_text,
                                     ppg=infer_ppg,
                                     duration=ref_audio_len * 2,
                                     steps=nfe_step,
-                                    cfg_strength=cfg_strength,
-                                    sway_sampling_coef=sway_sampling_coef,
-                                )
-                                generated_txt_ppg = generated_txt_ppg.to(torch.float32)
-                                gen_txt_ppg_mel_spec = generated_txt_ppg[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
-                                
-                                generated_ppg, _ = self.accelerator.unwrap_model(self.model).sample(
-                                    cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
-                                    text=None,
-                                    ppg=infer_ppg,
-                                    duration=ref_audio_len * 2,
-                                    steps=nfe_step,
-                                    cfg_strength=cfg_strength,
+                                    alpha_spk=2.5,
+                                    alpha_ppg=3,
                                     sway_sampling_coef=sway_sampling_coef,
                                 )
                                 generated_ppg = generated_ppg.to(torch.float32)
                                 gen_ppg_mel_spec = generated_ppg[:, ref_audio_len:, :].permute(0, 2, 1).to(self.accelerator.device)
                                 
                                 if self.vocoder_name == "vocos":
-                                    gen_audio_txt_ppg = vocoder.decode(gen_txt_ppg_mel_spec).cpu()
                                     gen_audio_ppg = vocoder.decode(gen_ppg_mel_spec).cpu()
                                 elif self.vocoder_name == "bigvgan":
-                                    gen_audio_txt_ppg = vocoder(gen_txt_ppg_mel_spec).squeeze(0).cpu()
                                     gen_audio_ppg = vocoder(gen_ppg_mel_spec).squeeze(0).cpu()
-                                    
-                            torchaudio.save(
-                                f"{log_samples_path}/update_{global_update}_gen_txt_ppg.wav", gen_audio_txt_ppg, target_sample_rate
-                            )
+
                             torchaudio.save(
                                 f"{log_samples_path}/update_{global_update}_gen_ppg.wav", gen_audio_ppg, target_sample_rate
                             )
                         
                         with torch.inference_mode():
-                            generated_txt, _ = self.accelerator.unwrap_model(self.model).sample(
+                            generated_txt, _ = self.accelerator.unwrap_model(self.model).sample_tts(
                                 cond=mel_spec[0][:ref_audio_len].unsqueeze(0),
                                 text=infer_text,
-                                ppg=None,
                                 duration=ref_audio_len * 2,
                                 steps=nfe_step,
-                                cfg_strength=cfg_strength,
+                                alpha_spk=2.5,
+                                alpha_txt=3,
                                 sway_sampling_coef=sway_sampling_coef,
                             )
                             generated_txt = generated_txt.to(torch.float32)
