@@ -344,7 +344,7 @@ class DiT(nn.Module):
 
         perplex_loss *= self.perplex_loss_weight
         return text_embed, ppg_embed, perplex_loss
-    
+
     def cross_mask(self, attn, text_embed, text_len, ppg_embed, ppg_len):
         device = text_embed.device
         batch, max_text_len, _ = text_embed.shape
@@ -353,21 +353,19 @@ class DiT(nn.Module):
         text_valid_mask = get_mask_from_lengths(text_len, max_len=max_text_len).to(device) # [batch, max_text_len]
         ppg_valid_mask = get_mask_from_lengths(ppg_len, max_len=max_ppg_len).to(device)
 
-        # for each sample, randomly mask 30% ~ 70% valid text token
-        text_mask = torch.ones(batch, max_text_len, dtype=torch.bool, device=device)
-        mask_ratio = 0.3 + 0.4 * torch.rand(batch, device=device)  # [batch,]
+        # for each sample, randomly mask a continuous span of 30% ~ 70% valid text tokens
         text_len = text_len.to(device)
-        mask_nums = (mask_ratio * text_len).long().clamp(min=0)
-        for b in range(batch):
-            this_text_len = text_len[b].item()
-            mask_num = mask_nums[b].item()
-            indices = torch.randperm(this_text_len, device=device) # randomly select mask indices
-            mask_indices = indices[:mask_num]
-            text_mask[b, mask_indices] = False
+        mask_ratio = 0.3 + 0.4 * torch.rand(batch, device=device) # [batch]
+        mask_len = (mask_ratio * text_len.float()).clamp(min=1).long()
+        start_max = text_len - mask_len
+        start_ratio = torch.rand(batch, device=device)
+        start = (start_max * start_ratio).long()
+        indices = torch.arange(max_text_len, device=device).expand(batch, -1)
+        end = start + mask_len
+        text_mask = (indices < start.unsqueeze(1)) | (indices >= end.unsqueeze(1))
+        text_mask &= text_valid_mask # also mask the paddings after valid text tokens
 
-        text_mask &= text_valid_mask # [batch, max_text_len], also mask paddings after valid text tokens
-
-        # generate PPG mask corresponding to text mask
+        # find corresponding PPG mask using alignment
         ppg_to_text = attn.argmax(dim=1)  # [batch, max_ppg_len], which text token each PPG token corresponds to
         ppg_mask = text_mask.gather(1, ppg_to_text)  # [batch, max_ppg_len]
         ppg_mask = ~ppg_mask  # if the corresponding text token is reserved, then the PPG token is masked
