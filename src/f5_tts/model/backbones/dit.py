@@ -190,6 +190,9 @@ class DiT(nn.Module):
         if self.use_ppg:
             self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
             self.use_cross_mask = ppg_config.get("use_cross_mask", False)
+            if self.use_cross_mask:
+                cross_mask_cfg = ppg_config["cross_mask_config"]
+                self.cross_mask_prob = cross_mask_cfg["cross_mask_prob"]
             
         self.use_codebook = cb_config["use_codebook"]
         if self.use_codebook:
@@ -478,7 +481,8 @@ class DiT(nn.Module):
         
         if self.use_cross_mask and use_both_modal:
             attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
-            text_embed, ppg_embed = self.cross_mask(attn, text_embed, text_len, ppg_embed, ppg_len)
+            if random.random() < self.cross_mask_prob:
+                text_embed, ppg_embed = self.cross_mask(attn, text_embed, text_len, ppg_embed, ppg_len)
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 

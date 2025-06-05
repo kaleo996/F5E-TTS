@@ -1,13 +1,21 @@
 def parse_ppg_config(ppg_cfg):
+    use_cross_mask = ppg_cfg.get("use_cross_mask", False)
+    if use_cross_mask:
+        cross_mask_config = dict(
+            cross_mask_prob = ppg_cfg.cross_mask_config.cross_mask_prob,
+        )
+    else:
+        cross_mask_config = dict()
     transformer_ppg_config = dict(
         use_ppg = True,
         ppg_dim = ppg_cfg.dim,
-        use_cross_mask = ppg_cfg.get("use_cross_mask", False)
+        use_cross_mask = use_cross_mask,
+        cross_mask_config = cross_mask_config
     )
     cfm_ppg_config = dict(
         use_ppg = True,
         combined_cond_drop_prob = ppg_cfg.combined_cond_drop_prob,
-        use_cross_mask = ppg_cfg.get("use_cross_mask", False)
+        use_cross_mask = use_cross_mask
     )
     trainer_ppg_config = dict(
         use_ppg = True,
