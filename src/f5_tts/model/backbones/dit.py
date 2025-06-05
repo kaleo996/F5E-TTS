@@ -300,13 +300,17 @@ class DiT(nn.Module):
         return attn
     
     def calc_align_loss(self, attn, text_embed, text_len, ppg_embed):
-        text_embed = self.quantizer(text_embed)["x"]
-        ppg_embed = self.quantizer(ppg_embed)["x"]
+        text_embed_q = self.quantizer(text_embed)["x"]
+        ppg_embed_q = self.quantizer(ppg_embed)["x"]
+        
+        # skip codebook when back propagation, so that align loss only updates network before quantization
+        text_embed_q = text_embed + (text_embed_q - text_embed).detach()
+        ppg_embed_q = ppg_embed + (ppg_embed_q - ppg_embed).detach()
 
         max_txt_len = text_embed.shape[1]
 
         # sum of PPG embeddings corresponding to each text token
-        summed_ppg_embed = torch.bmm(attn, ppg_embed) # [batch, max_txt_len, max_ppg_len] @ [batch, max_ppg_len, dim] -> [batch, max_txt_len, dim]
+        summed_ppg_embed = torch.bmm(attn, ppg_embed_q) # [batch, max_txt_len, max_ppg_len] @ [batch, max_ppg_len, dim] -> [batch, max_txt_len, dim]
         counts = attn.sum(dim=2) # [batch, max_txt_len], how many PPG tokens each text token is aligned to
         counts = counts.clamp(min=1e-8) # avoid division by zero
 
@@ -314,7 +318,7 @@ class DiT(nn.Module):
         avg_ppg = summed_ppg_embed / counts.unsqueeze(-1) # [batch, max_txt_len, dim] / [batch, max_txt_len, 1] -> [batch, max_txt_len, dim]
 
         # MSE loss between each text token and its corresponding average PPG embeddings
-        loss_tensor = (text_embed - avg_ppg) ** 2 # [batch, max_txt_len, dim]
+        loss_tensor = (text_embed_q - avg_ppg) ** 2 # [batch, max_txt_len, dim]
         loss_tensor = loss_tensor.mean(dim=2) # [batch, max_txt_len], average over embedding dimensions
         mask = get_mask_from_lengths(text_len, max_len=max_txt_len) # [batch, max_txt_len], apply mask to ignore padding tokens
         mask = mask.to(loss_tensor.device)
