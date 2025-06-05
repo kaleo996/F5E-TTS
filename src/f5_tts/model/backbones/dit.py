@@ -436,6 +436,10 @@ class DiT(nn.Module):
             if not drop_text and not drop_ppg and self.use_align_loss:
                 attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
                 align_loss = self.calc_align_loss(attn, text_embed, text_len, ppg_embed)
+                # check if align_loss is NaN
+                if torch.isnan(align_loss).any():
+                    print("align_loss is NaN")
+                    align_loss = 0
                 extra_loss += align_loss
 
             # perplexity loss: encourage codebook to use same group of quantized vectors for both txt and ppg modalities
