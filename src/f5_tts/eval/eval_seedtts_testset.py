@@ -13,7 +13,7 @@ from importlib.resources import files
 
 import numpy as np
 
-from f5_tts.eval.utils_eval import get_seed_tts_test, run_asr_wer_whisper_large_v3, run_sim
+from f5_tts.eval.utils_eval import get_seed_tts_test, run_asr_wer, run_asr_wer_whisper_large_v3, run_sim
 
 
 rel_path = str(files("f5_tts").joinpath("../../"))
@@ -44,12 +44,12 @@ def main():
     local = args.local
     if local:  # use local custom checkpoint dir
         if lang == "zh":
-            asr_ckpt_dir = "../checkpoints/funasr"  # paraformer-zh dir under funasr
+            asr_ckpt_dir = "pretrained_models"  # paraformer-zh dir under funasr
         elif lang == "en":
             asr_ckpt_dir = "pretrained_models/whisper-large-v3"
     else:
         asr_ckpt_dir = ""  # auto download to cache dir
-    wavlm_ckpt_dir = "../checkpoints/UniSpeech/wavlm_large_finetune.pth"
+    wavlm_ckpt_dir = "pretrained_models/wavlm_large_finetune.pth"
 
     # --------------------------------------------------------------------------
 
