@@ -479,8 +479,8 @@ class DiT(nn.Module):
                 # check if align_loss is NaN
                 if torch.isnan(align_loss).any():
                     print("align_loss is NaN")
-                    align_loss = 0
-                extra_loss += align_loss
+                else:
+                    extra_loss += align_loss
 
             # perplexity loss: encourage codebook to use same group of quantized vectors for both txt and ppg modalities
             if self.use_perplex_loss:

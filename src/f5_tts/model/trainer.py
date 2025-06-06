@@ -393,6 +393,13 @@ class Trainer:
                     loss, cond, pred = self.model(
                         mel_spec, text=text_inputs, ppg=ppg_inputs, lens=mel_lengths, noise_scheduler=self.noise_scheduler
                     )
+                    
+                    # check if loss is nan
+                    if torch.isnan(loss).any():
+                        if self.is_main:
+                            print("Loss is NaN, skipping update")
+                        continue
+                    
                     self.accelerator.backward(loss)
 
                     if self.max_grad_norm > 0 and self.accelerator.sync_gradients:
