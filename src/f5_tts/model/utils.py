@@ -170,9 +170,50 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
     return vocab_char_map, vocab_size
 
 
+# split a pinyin into 4 parts according to Chinese phonology
+def split_pinyin(pinyin):
+    onset = None # 声母
+    medial = None # 介音
+    rime = None # 韵腹
+    coda = None # 韵尾
+    
+    valid_onsets = [
+        "b", "p", "m", "f",
+        "d", "t", "n", "l",
+        "g", "k", "h",
+        "j", "q", "x",
+        "zh", "ch", "sh", "r",
+        "z", "c", "s",
+        "y", "w"
+    ]
+    for o in valid_onsets:
+        if pinyin.startswith(o):
+            onset = o
+            pinyin = pinyin[len(o):]
+            break
+
+    valid_codas = ["n", "ng"]
+    for c in valid_codas:
+        if pinyin.endswith(c):
+            coda = c
+            pinyin = pinyin[:-len(c)]
+            break
+
+    valid_medials = ['i', 'u', 'ü']
+    for m in valid_medials:
+        if pinyin.startswith(m):
+            medial = m
+            pinyin = pinyin[len(m):]
+            break
+
+    rime = pinyin
+
+    return [x for x in [onset, medial, rime, coda] if x is not None]
+
+
 # convert char to finer pinyin
-# `convert_char_to_pinyin` treat the pronunciation of a chinese character as one token, e.g. ['xuan1']
-# but in this func, we split pinyin into one-character tokens like how F5-TTS treats English, e.g. ['x', 'u', 'ā', 'n']
+# `convert_char_to_pinyin` treat the pronunciation of a chinese character as one token, e.g. ['chuan1']
+# but in this func, we split a Chinese syllable into at most 4 parts using `split_pinyin`, e.g. ['ch', 'u', 'ā', 'n']
 def convert_char_to_finer_pinyin(text_list, polyphone=True):
     if jieba.dt.initialized is False:
         jieba.default_logger.setLevel(50)  # CRITICAL
@@ -203,7 +244,9 @@ def convert_char_to_finer_pinyin(text_list, polyphone=True):
                     if is_chinese(c):
                         if char_list and char_list[-1] not in " :'\"":
                             char_list.append(" ")
-                    char_list.extend([char for char in seg_[i]])
+                        char_list.extend([char + "_zh" for char in split_pinyin(seg_[i])])
+                    else:
+                        char_list.extend([char for char in seg_[i]])
             else:  # if mixed characters, alphabets and symbols
                 for c in seg:
                     if ord(c) < 256:
@@ -212,7 +255,7 @@ def convert_char_to_finer_pinyin(text_list, polyphone=True):
                         if char_list and char_list[-1] not in " :'\"":
                             char_list.append(" ")
                         syllable = lazy_pinyin(c, style=Style.TONE, tone_sandhi=True)[0]
-                        pinyin_list = [char for char in syllable]
+                        pinyin_list = [char + "_zh" for char in split_pinyin(syllable)]
                         char_list.extend(pinyin_list)
                     else:
                         char_list.append(c)
