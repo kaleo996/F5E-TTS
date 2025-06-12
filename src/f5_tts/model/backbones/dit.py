@@ -352,36 +352,26 @@ class DiT(nn.Module):
         perplex_loss *= self.perplex_loss_weight
         return text_embed, ppg_embed, perplex_loss
 
-    def cross_mask(self, attn, text_embed, text_len, ppg_embed, ppg_len):
-        device = text_embed.device
-        batch, max_text_len, _ = text_embed.shape
-        _, max_ppg_len, _ = ppg_embed.shape
+    def single_mask(self, embed, len):
+        device = embed.device
+        batch, max_len, _ = embed.shape
 
-        text_valid_mask = get_mask_from_lengths(text_len, max_len=max_text_len).to(device) # [batch, max_text_len]
-        ppg_valid_mask = get_mask_from_lengths(ppg_len, max_len=max_ppg_len).to(device)
+        valid_mask = get_mask_from_lengths(len, max_len=max_len).to(device) # [batch, max_len]
 
-        # for each sample, randomly mask a continuous span of 30% ~ 70% valid text tokens
-        text_len = text_len.to(device)
-        mask_ratio = 0.3 + 0.4 * torch.rand(batch, device=device) # [batch]
-        mask_len = (mask_ratio * text_len.float()).clamp(min=1).long()
-        start_max = text_len - mask_len
+        # for each sample, randomly mask a continuous span of valid tokens
+        len = len.to(device)
+        mask_len = (self.cross_mask_prob * len.float()).clamp(min=1).long()
+        start_max = len - mask_len
         start_ratio = torch.rand(batch, device=device)
         start = (start_max * start_ratio).long()
-        indices = torch.arange(max_text_len, device=device).expand(batch, -1)
+        indices = torch.arange(max_len, device=device).expand(batch, -1)
         end = start + mask_len
-        text_mask = (indices < start.unsqueeze(1)) | (indices >= end.unsqueeze(1))
-        text_mask &= text_valid_mask # also mask the paddings after valid text tokens
+        mask = (indices < start.unsqueeze(1)) | (indices >= end.unsqueeze(1))
+        mask &= valid_mask # also mask the paddings after valid text tokens
 
-        # find corresponding PPG mask using alignment
-        ppg_to_text = attn.argmax(dim=1)  # [batch, max_ppg_len], which text token each PPG token corresponds to
-        ppg_mask = text_mask.gather(1, ppg_to_text)  # [batch, max_ppg_len]
-        ppg_mask = ~ppg_mask  # if the corresponding text token is reserved, then the PPG token is masked
-        ppg_mask &= ppg_valid_mask
+        masked_embed = embed.masked_fill(~mask.unsqueeze(-1), 0)
 
-        masked_text_embed = text_embed.masked_fill(~text_mask.unsqueeze(-1), 0)
-        masked_ppg_embed = ppg_embed.masked_fill(~ppg_mask.unsqueeze(-1), 0)
-
-        return masked_text_embed, masked_ppg_embed
+        return masked_embed
     
     def sample(
         self,
@@ -487,10 +477,11 @@ class DiT(nn.Module):
                 text_embed, ppg_embed, perplex_loss = self.quantize_calc_perplex_loss(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
                 extra_loss += perplex_loss
         
-        if self.use_cross_mask and use_both_modal:
-            attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
-            if random.random() < self.cross_mask_prob:
-                text_embed, ppg_embed = self.cross_mask(attn, text_embed, text_len, ppg_embed, ppg_len)
+        if self.use_cross_mask:
+            if not drop_text:
+                text_embed = self.single_mask(text_embed, text_len)
+            if not drop_ppg:
+                ppg_embed = self.single_mask(ppg_embed, ppg_len)
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 
