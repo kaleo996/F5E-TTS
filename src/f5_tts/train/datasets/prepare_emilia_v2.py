@@ -10,7 +10,7 @@ from pathlib import Path
 from datasets.arrow_writer import ArrowWriter
 from tqdm import tqdm
 
-from f5_tts.model.utils import convert_char_to_pinyin, repetition_found
+from f5_tts.model.utils import convert_char_to_pinyin, convert_char_to_finer_pinyin, repetition_found
 
 
 # Define filters for exclusion
@@ -42,6 +42,8 @@ def process_audio_directory(audio_dir):
                         text = text.translate(str.maketrans({",": "，", "!": "！", "?": "？"}))
                 if tokenizer == "pinyin":
                     text = convert_char_to_pinyin([text], polyphone=polyphone)[0]
+                elif tokenizer == "finer-pinyin":
+                    text = convert_char_to_finer_pinyin([text], polyphone=polyphone)[0]
 
                 duration = obj["duration"]
                 audio_file = file.with_suffix(".mp3")
@@ -54,7 +56,6 @@ def process_audio_directory(audio_dir):
 
 
 def main():
-    assert tokenizer in ["pinyin", "char"]
     result, duration_list, text_vocab_set = [], [], set()
     total_bad_case_zh = 0
     total_bad_case_en = 0
@@ -103,14 +104,15 @@ def main():
 
 if __name__ == "__main__":
     max_workers = 32
-    tokenizer = "pinyin"
+    tokenizer = "finer-pinyin"
     polyphone = True
-    dataset_dir = "/apdcephfs_cq10/share_1297902/user/nenali/project/chukewang/data/Emilia-Dataset-test"
+    dataset_dir = "/apdcephfs_sh3/share_301772008/private/nenali/chukewang/data/emilia/Emilia-Dataset-unzipped"
     splits = ["Emilia", "Emilia-YODAS"]
     langs = ["EN", "ZH"]
-    dataset_name = f"Emilia_{'_'.join(langs)}_{tokenizer}"
+    dataset_name = f"Emilia_{'_'.join(langs)}_sh_{tokenizer}"
     # save_dir = os.path.expanduser(f"~/F5-TTS/data/{dataset_name}")
-    save_dir = str(files("f5_tts").joinpath("../../")) + f"/data/{dataset_name}"
+    save_dir = f"/apdcephfs_sh3/share_301772008/private/nenali/chukewang/data/emilia/{dataset_name}"
+    # save_dir = str(files("f5_tts").joinpath("../../")) + f"/data/{dataset_name}"
 
     print(f"Prepare for {dataset_name}, will save to {save_dir}\n")
     main()
