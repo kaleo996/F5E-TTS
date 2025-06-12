@@ -1,11 +1,21 @@
 def parse_ppg_config(ppg_cfg):
+    use_cross_mask = ppg_cfg.get("use_cross_mask", False)
+    if use_cross_mask:
+        cross_mask_config = dict(
+            cross_mask_prob = ppg_cfg.cross_mask_config.cross_mask_prob,
+        )
+    else:
+        cross_mask_config = dict()
     transformer_ppg_config = dict(
         use_ppg = True,
-        ppg_dim = ppg_cfg.dim
+        ppg_dim = ppg_cfg.dim,
+        use_cross_mask = use_cross_mask,
+        cross_mask_config = cross_mask_config
     )
     cfm_ppg_config = dict(
         use_ppg = True,
-        combined_cond_drop_prob = ppg_cfg.combined_cond_drop_prob
+        combined_cond_drop_prob = ppg_cfg.combined_cond_drop_prob,
+        use_cross_mask = use_cross_mask
     )
     trainer_ppg_config = dict(
         use_ppg = True,
@@ -22,10 +32,25 @@ def parse_ppg_config(ppg_cfg):
     return transformer_ppg_config, cfm_ppg_config, trainer_ppg_config
 
 def parse_codebook_config(codebook_cfg):
+    use_perplex_loss = codebook_cfg.get('use_perplex_loss', False)
+    if use_perplex_loss:
+        perplex_loss_config = dict(
+            perplex_loss_prob = codebook_cfg.perplex_loss_config.perplex_loss_prob,
+            perplex_loss_weight = codebook_cfg.perplex_loss_config.perplex_loss_weight
+        )
+    else:
+        perplex_loss_config = dict()
+    
+    use_align_loss = codebook_cfg.get('use_align_loss', False)
+    if use_align_loss:
+        align_loss_config = dict(
+            align_loss_weight = codebook_cfg.align_loss_config.align_loss_weight
+        )
+    else:
+        align_loss_config = dict()
+
     transformer_codebook_config = dict(
         use_codebook = True,
-        codebook_prob = codebook_cfg.codebook_prob,
-        codebook_loss_weight = codebook_cfg.codebook_loss_weight,
         num_vars = codebook_cfg.num_vars,
         temp_start = codebook_cfg.temp_start,
         temp_stop = codebook_cfg.temp_stop,
@@ -33,22 +58,18 @@ def parse_codebook_config(codebook_cfg):
         groups = codebook_cfg.groups,
         combine_groups = codebook_cfg.combine_groups,
         weight_proj_depth = codebook_cfg.weight_proj_depth,
-        weight_proj_factor = codebook_cfg.weight_proj_factor
+        weight_proj_factor = codebook_cfg.weight_proj_factor,
+
+        use_perplex_loss = use_perplex_loss,
+        perplex_loss_config = perplex_loss_config,
+
+        use_align_loss = use_align_loss,
+        align_loss_config = align_loss_config
     )
+
     cfm_codebook_config = dict(
         use_codebook = True,
+        use_align_loss = use_align_loss
     )
-    return transformer_codebook_config, cfm_codebook_config
 
-def parse_durpred_config(durpred_cfg):
-    transformer_durpred_config = dict(
-        use_durpred = True,
-        style_vector_dim = durpred_cfg.style_vector_dim,
-        filter_channels = durpred_cfg.filter_channels,
-        kernel_size = durpred_cfg.kernel_size,
-        dropout = durpred_cfg.dropout
-    )
-    cfm_codebook_config = dict(
-        use_durpred = True,
-    )
-    return transformer_durpred_config, cfm_codebook_config
+    return transformer_codebook_config, cfm_codebook_config

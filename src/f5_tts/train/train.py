@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from f5_tts.model import CFM, Trainer
 from f5_tts.model.dataset import load_dataset
 from f5_tts.model.utils import get_tokenizer
-from parse_cfg import parse_ppg_config, parse_codebook_config, parse_durpred_config
+from parse_cfg import parse_ppg_config, parse_codebook_config
 
 
 os.chdir(str(files("f5_tts").joinpath("../..")))  # change working directory to root of project (local editable)
@@ -43,13 +43,7 @@ def main(model_cfg):
     if use_ppg and use_codebook:
         transformer_cb_config, cfm_cb_config = parse_codebook_config(model_cfg.model.codebook_config)
     else:
-        transformer_cb_config = cfm_cb_config = dict(use_codebook = False)
-
-    use_durpred = model_cfg.model.get("use_durpred", False)
-    if use_durpred:
-        transformer_durpred_config, cfm_durpred_config = parse_durpred_config(model_cfg.model.durpred_config)
-    else:
-        transformer_durpred_config = cfm_durpred_config = dict(use_durpred = False)
+        transformer_cb_config = cfm_cb_config = dict(use_codebook = False, use_align_loss = False)
 
     transformer = model_cls(
         **model_arc,
@@ -57,7 +51,6 @@ def main(model_cfg):
         mel_dim=model_cfg.model.mel_spec.n_mel_channels,
         ppg_config=transformer_ppg_config,
         cb_config=transformer_cb_config,
-        durpred_config=transformer_durpred_config
     )
 
     # set model
@@ -67,7 +60,6 @@ def main(model_cfg):
         vocab_char_map=vocab_char_map,
         ppg_config=cfm_ppg_config,
         cb_config=cfm_cb_config,
-        durpred_config=cfm_durpred_config
     )
 
     # init trainer

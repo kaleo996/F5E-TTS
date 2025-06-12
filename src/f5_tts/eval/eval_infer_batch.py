@@ -23,7 +23,7 @@ from f5_tts.eval.utils_eval import (
 from f5_tts.infer.utils_infer import load_checkpoint, load_vocoder
 from f5_tts.model import CFM
 from f5_tts.model.utils import get_tokenizer
-from f5_tts.train.parse_cfg import parse_ppg_config, parse_codebook_config, parse_durpred_config
+from f5_tts.train.parse_cfg import parse_ppg_config, parse_codebook_config
 
 
 accelerator = Accelerator()
@@ -68,7 +68,7 @@ def main():
     use_truth_duration = False
     no_ref_audio = False
 
-    model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/libritts_test_cfg/txt_ratio/{exp_name}.yaml")))
+    model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/emilia_ablation/{exp_name}.yaml")))
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
 
@@ -97,12 +97,6 @@ def main():
         transformer_cb_config, cfm_cb_config = parse_codebook_config(model_cfg.model.codebook_config)
     else:
         transformer_cb_config = cfm_cb_config = dict(use_codebook = False)
-
-    use_durpred = model_cfg.model.get("use_durpred", False)
-    if use_durpred:
-        transformer_durpred_config, cfm_durpred_config = parse_durpred_config(model_cfg.model.durpred_config)
-    else:
-        transformer_durpred_config = cfm_durpred_config = dict(use_durpred = False)
 
     if testset == "ls_pc_test_clean":
         metalst = rel_path + "/data/librispeech_pc_test_clean_cross_sentence.lst"
@@ -164,7 +158,6 @@ def main():
             mel_dim=n_mel_channels,
             ppg_config=transformer_ppg_config,
             cb_config=transformer_cb_config,
-            durpred_config=transformer_durpred_config,
         ),
         mel_spec_kwargs=dict(
             n_fft=n_fft,
@@ -180,7 +173,6 @@ def main():
         vocab_char_map=vocab_char_map,
         ppg_config=cfm_ppg_config,
         cb_config=cfm_cb_config,
-        durpred_config=cfm_durpred_config,
     ).to(device)
 
     ckpt_path = rel_path + f"/ckpts/{exp_name}/model_{ckpt_step}.pt"

@@ -16,6 +16,27 @@ def intersperse(text, sep="_") -> list[list[str]]:
     return output
 
 
+def sequence_mask(length: torch.Tensor, max_length: int | None = None) -> torch.Tensor:
+    if max_length is None:
+        max_length = length.max()
+    x = torch.arange(max_length, dtype=length.dtype, device=length.device)
+    return x.unsqueeze(0) < length.unsqueeze(1)
+
+
+def generate_path(duration, mask):
+    b, t_x, t_y = mask.shape
+    cum_duration = torch.cumsum(duration, 1)
+    path = torch.zeros(b, t_x, t_y, dtype=mask.dtype, device=duration.device)
+
+    cum_duration_flat = cum_duration.view(b * t_x)
+    path = sequence_mask(cum_duration_flat, t_y).to(mask.dtype)
+    path = path.view(b, t_x, t_y)
+    path = path.float()
+    path = path - F.pad(path, [0, 0, 1, 0, 0, 0])[:, :-1]
+    path = path * mask
+    return path
+
+
 def random_masking(mask, mask_prob):
     assert mask.ndim == 2
     lens = mask.shape[-1]

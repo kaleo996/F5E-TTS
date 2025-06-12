@@ -143,7 +143,7 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
                 - if use "char", derived from unfiltered character & symbol counts of custom dataset
                 - if use "byte", set to 256 (unicode byte range)
     """
-    if tokenizer in ["pinyin", "char"]:
+    if tokenizer in ["pinyin", "char", "char-level-pinyin", "phone-level-pinyin"]:
         tokenizer_path = os.path.join(files("f5_tts").joinpath("../../data"), f"{dataset_name}_{tokenizer}/vocab.txt")
         with open(tokenizer_path, "r", encoding="utf-8") as f:
             vocab_char_map = {}

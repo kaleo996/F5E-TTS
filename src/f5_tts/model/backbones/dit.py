@@ -9,7 +9,9 @@ d - dimension
 
 from __future__ import annotations
 
+import math
 import torch
+import random
 import torch.nn.functional as F
 from torch import nn
 from x_transformers.x_transformers import RotaryEmbedding
@@ -26,7 +28,6 @@ from f5_tts.model.modules import (
     GumbelVectorQuantizer
 )
 
-from f5_tts.durpred import MelStyleEncoder, DurationPredictor, duration_loss
 from f5_tts.durpred import get_mask_from_lengths
 import f5_tts.durpred.monotonic_align as monotonic_align
 
@@ -122,7 +123,6 @@ class PPGEmbedding(nn.Module):
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
             if drop_ppg:  # cfg for ppg
                 ppg_embed = torch.zeros_like(ppg_embed)
-        # import ipdb; ipdb.set_trace()
         ppg_embed = self.ppg_proj(ppg_embed)
         return ppg_embed
 
@@ -175,7 +175,6 @@ class DiT(nn.Module):
         checkpoint_activations=False,
         ppg_config=dict(use_ppg=False),
         cb_config=dict(use_codebook=False),
-        durpred_config=dict(use_durpred=False),
     ):
         super().__init__()
 
@@ -190,19 +189,26 @@ class DiT(nn.Module):
         self.use_ppg = ppg_config["use_ppg"]
         if self.use_ppg:
             self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
+            self.use_cross_mask = ppg_config.get("use_cross_mask", False)
+            if self.use_cross_mask:
+                cross_mask_cfg = ppg_config["cross_mask_config"]
+                self.cross_mask_prob = cross_mask_cfg["cross_mask_prob"]
             
         self.use_codebook = cb_config["use_codebook"]
         if self.use_codebook:
-            self.codebook_prob = cb_config["codebook_prob"]
-            self.codebook_loss_weight = cb_config["codebook_loss_weight"]
             self.quantizer = self.get_codebook(cb_config, text_dim)
-        
-        self.use_durpred = durpred_config["use_durpred"]
-        if self.use_durpred:
-            self.style_vector_dim = durpred_config.style_vector_dim
-            self.durpred_text_embed = nn.Linear(text_dim, mel_dim) # project text to mel_dim, so that monotonic alignment search can be performed
-            self.spk_encoder, self.durpred = self.get_durpred(durpred_config, mel_dim, text_dim)
-        
+            
+            self.use_perplex_loss = cb_config.get("use_perplex_loss", False)
+            if self.use_perplex_loss:
+                perplex_loss_cfg = cb_config["perplex_loss_config"]
+                self.perplex_loss_prob = perplex_loss_cfg["perplex_loss_prob"]
+                self.perplex_loss_weight = perplex_loss_cfg["perplex_loss_weight"]
+            
+            self.use_align_loss = cb_config.get("use_align_loss", False)
+            if self.use_align_loss:
+                align_loss_cfg = cb_config["align_loss_config"]
+                self.align_loss_weight = align_loss_cfg["align_loss_weight"]
+
         self.input_embed = InputEmbedding(mel_dim, text_dim, dim, self.use_ppg)
 
         self.rotary_embed = RotaryEmbedding(dim_head)
@@ -269,37 +275,113 @@ class DiT(nn.Module):
                 weight_proj_factor = cb_config["weight_proj_factor"]
             )
     
-    def get_durpred(self, durpred_config, mel_dim, text_dim):
-        spk_encoder = MelStyleEncoder(n_mel_channels=mel_dim, style_vector_dim=self.style_vector_dim)
-        durpred = DurationPredictor(
-            in_channels = text_dim,
-            filter_channels = durpred_config.filter_channels,
-            kernel_size = durpred_config.kernel_size,
-            p_dropout = durpred_config.dropout,
-            style_vector_dim = self.style_vector_dim
-        )
-        return spk_encoder, durpred
+    # use MAS to align text and ppg
+    def align_text_ppg(self, text_embed, text_len, ppg_embed, ppg_len):
+        max_len = text_embed.shape[1] # text_embed and ppg_embed are both padded to the len of mel
+        text_mask = get_mask_from_lengths(text_len, max_len=max_len)
+        ppg_mask = get_mask_from_lengths(ppg_len, max_len=max_len)
+        text_mask = text_mask.to(text_embed.device)
+        ppg_mask = ppg_mask.to(text_embed.device)
+        
+        text_embed_t = text_embed.transpose(1, 2) # [b, d, nt]
+        ppg_embed_t = ppg_embed.transpose(1, 2) # [b, d, nt]
+        with torch.no_grad():
+            s_p_sq_r = torch.ones_like(text_embed_t)
+            neg_cent1 = torch.sum(-0.5 * math.log(2 * math.pi)- torch.zeros_like(text_embed_t), [1], keepdim=True)
+            neg_cent2 = torch.einsum("bdt, bds -> bts", -0.5 * (ppg_embed_t**2), s_p_sq_r)
+            neg_cent3 = torch.einsum("bdt, bds -> bts", ppg_embed_t, (text_embed_t * s_p_sq_r))
+            neg_cent4 = torch.sum(-0.5 * (text_embed_t**2) * s_p_sq_r, [1], keepdim=True)  
+            neg_cent = neg_cent1 + neg_cent2 + neg_cent3 + neg_cent4
+            
+            attn_mask = text_mask.unsqueeze(1) * ppg_mask.unsqueeze(2)
+            attn = (monotonic_align.maximum_path(neg_cent, attn_mask.squeeze(1)).detach())
+
+        attn = attn.transpose(1, 2)
+        return attn
     
+    def calc_align_loss(self, attn, text_embed, text_len, ppg_embed):
+        text_embed_q = self.quantizer(text_embed)["x"]
+        ppg_embed_q = self.quantizer(ppg_embed)["x"]
+        
+        # skip codebook when back propagation, so that align loss only updates network before quantization
+        text_embed_q = text_embed + (text_embed_q - text_embed).detach()
+        ppg_embed_q = ppg_embed + (ppg_embed_q - ppg_embed).detach()
+
+        max_txt_len = text_embed.shape[1]
+
+        # sum of PPG embeddings corresponding to each text token
+        summed_ppg_embed = torch.bmm(attn, ppg_embed_q) # [batch, max_txt_len, max_ppg_len] @ [batch, max_ppg_len, dim] -> [batch, max_txt_len, dim]
+        counts = attn.sum(dim=2) # [batch, max_txt_len], how many PPG tokens each text token is aligned to
+        counts = counts.clamp(min=1e-8) # avoid division by zero
+
+        # average PPG embedding for each text token
+        avg_ppg = summed_ppg_embed / counts.unsqueeze(-1) # [batch, max_txt_len, dim] / [batch, max_txt_len, 1] -> [batch, max_txt_len, dim]
+
+        # MSE loss between each text token and its corresponding average PPG embeddings
+        loss_tensor = (text_embed_q - avg_ppg) ** 2 # [batch, max_txt_len, dim]
+        loss_tensor = loss_tensor.mean(dim=2) # [batch, max_txt_len], average over embedding dimensions
+        mask = get_mask_from_lengths(text_len, max_len=max_txt_len) # [batch, max_txt_len], apply mask to ignore padding tokens
+        mask = mask.to(loss_tensor.device)
+        loss_tensor = loss_tensor * mask
+        total_loss = loss_tensor.sum() / (mask.sum() + 1e-8)
+        total_loss *= self.align_loss_weight
+
+        return total_loss
+
     # quantize 10% of txt and ppg tokens
     # text_embed: [b, nt, d], text_len: [b], ppg_embed: [b, n, d], ppg_len: [b]
-    def quantize(self, text_embed, ppg_embed, drop_text=False, drop_ppg=False):
-        cb_loss = 0
+    def quantize_calc_perplex_loss(self, text_embed, ppg_embed, drop_text=False, drop_ppg=False):
+        perplex_loss = 0
+
         if not drop_text:
             quantized_text = self.quantizer(text_embed) # quantized_text is a dict
-            text_rand_idx = torch.randperm(text_embed.size(1))[:int(text_embed.size(1) * self.codebook_prob)]
+            text_rand_idx = torch.randperm(text_embed.size(1))[:int(text_embed.size(1) * self.perplex_loss_prob)]
             quantized_text_weight = quantized_text["x"].new_zeros(text_embed.size(1))
             quantized_text_weight[text_rand_idx] = 1
             text_embed = quantized_text_weight.unsqueeze(1) * quantized_text["x"] + (1 - quantized_text_weight).unsqueeze(1) * text_embed
-            cb_loss += (quantized_text["num_vars"] - quantized_text["prob_perplexity"]) / quantized_text["num_vars"]
+            perplex_loss += (quantized_text["num_vars"] - quantized_text["prob_perplexity"]) / quantized_text["num_vars"]
+
         if not drop_ppg:
             quantized_ppg = self.quantizer(ppg_embed)
-            ppg_rand_idx = torch.randperm(ppg_embed.size(1))[:int(ppg_embed.size(1) * self.codebook_prob)]
+            ppg_rand_idx = torch.randperm(ppg_embed.size(1))[:int(ppg_embed.size(1) * self.perplex_loss_prob)]
             quantized_ppg_weight = quantized_ppg["x"].new_zeros(ppg_embed.size(1))
             quantized_ppg_weight[ppg_rand_idx] = 1
             ppg_embed = quantized_ppg_weight.unsqueeze(1) * quantized_ppg["x"] + (1 - quantized_ppg_weight).unsqueeze(1) * ppg_embed
-            cb_loss += (quantized_ppg["num_vars"] - quantized_ppg["prob_perplexity"]) / quantized_ppg["num_vars"]
-        cb_loss *= self.codebook_loss_weight
-        return text_embed, ppg_embed, cb_loss
+            perplex_loss += (quantized_ppg["num_vars"] - quantized_ppg["prob_perplexity"]) / quantized_ppg["num_vars"]
+
+        perplex_loss *= self.perplex_loss_weight
+        return text_embed, ppg_embed, perplex_loss
+
+    def cross_mask(self, attn, text_embed, text_len, ppg_embed, ppg_len):
+        device = text_embed.device
+        batch, max_text_len, _ = text_embed.shape
+        _, max_ppg_len, _ = ppg_embed.shape
+
+        text_valid_mask = get_mask_from_lengths(text_len, max_len=max_text_len).to(device) # [batch, max_text_len]
+        ppg_valid_mask = get_mask_from_lengths(ppg_len, max_len=max_ppg_len).to(device)
+
+        # for each sample, randomly mask a continuous span of 30% ~ 70% valid text tokens
+        text_len = text_len.to(device)
+        mask_ratio = 0.3 + 0.4 * torch.rand(batch, device=device) # [batch]
+        mask_len = (mask_ratio * text_len.float()).clamp(min=1).long()
+        start_max = text_len - mask_len
+        start_ratio = torch.rand(batch, device=device)
+        start = (start_max * start_ratio).long()
+        indices = torch.arange(max_text_len, device=device).expand(batch, -1)
+        end = start + mask_len
+        text_mask = (indices < start.unsqueeze(1)) | (indices >= end.unsqueeze(1))
+        text_mask &= text_valid_mask # also mask the paddings after valid text tokens
+
+        # find corresponding PPG mask using alignment
+        ppg_to_text = attn.argmax(dim=1)  # [batch, max_ppg_len], which text token each PPG token corresponds to
+        ppg_mask = text_mask.gather(1, ppg_to_text)  # [batch, max_ppg_len]
+        ppg_mask = ~ppg_mask  # if the corresponding text token is reserved, then the PPG token is masked
+        ppg_mask &= ppg_valid_mask
+
+        masked_text_embed = text_embed.masked_fill(~text_mask.unsqueeze(-1), 0)
+        masked_ppg_embed = ppg_embed.masked_fill(~ppg_mask.unsqueeze(-1), 0)
+
+        return masked_text_embed, masked_ppg_embed
     
     def sample(
         self,
@@ -332,14 +414,10 @@ class DiT(nn.Module):
 
 
         if self.use_ppg:
-            ppg_embed = self.ppg_embed(ppg_embed=ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
+            ppg_embed = self.ppg_embed(ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
         else:
             ppg_embed = None
 
-        # TODO use durpred
-        if self.use_durpred and text is not None:
-            pass
-        
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 
         rope = self.rotary_embed.forward_from_seq_len(seq_len)
@@ -373,6 +451,8 @@ class DiT(nn.Module):
         drop_text,  # cfg for text
         drop_ppg,
         mask: bool["b n"] | None = None,  # noqa: F722
+        text_len = None,  # text length
+        ppg_len = None,
     ):
         batch, seq_len = x.shape[0], x.shape[1]
         if time.ndim == 0:
@@ -384,19 +464,33 @@ class DiT(nn.Module):
         text_embed = self.text_embed(text, batch, seq_len, drop_text=drop_text)
 
         if self.use_ppg:
-            ppg_embed = self.ppg_embed(ppg_embed=ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
+            ppg_embed = self.ppg_embed(ppg, seq_len=seq_len, drop_ppg=drop_ppg, batch=batch)
         else:
             ppg_embed = None
 
         extra_loss = 0
-        
-        # TODO use durpred
-        if self.use_durpred and text is not None:
-            pass
-        
+        use_both_modal = not drop_text and not drop_ppg
+
         if self.use_codebook:
-            text_embed, ppg_embed, cb_loss = self.quantize(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
-            extra_loss += cb_loss
+            # alignment loss: find corresponding txt-ppg token pairs, measure the distance between two modalities
+            if self.use_align_loss and use_both_modal:
+                attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
+                align_loss = self.calc_align_loss(attn, text_embed, text_len, ppg_embed)
+                # check if align_loss is NaN
+                if torch.isnan(align_loss).any():
+                    print("align_loss is NaN")
+                else:
+                    extra_loss += align_loss
+
+            # perplexity loss: encourage codebook to use same group of quantized vectors for both txt and ppg modalities
+            if self.use_perplex_loss:
+                text_embed, ppg_embed, perplex_loss = self.quantize_calc_perplex_loss(text_embed, ppg_embed, drop_text=drop_text, drop_ppg=drop_ppg)
+                extra_loss += perplex_loss
+        
+        if self.use_cross_mask and use_both_modal:
+            attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
+            if random.random() < self.cross_mask_prob:
+                text_embed, ppg_embed = self.cross_mask(attn, text_embed, text_len, ppg_embed, ppg_len)
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
 

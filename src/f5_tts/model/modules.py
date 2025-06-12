@@ -788,7 +788,7 @@ class GumbelVectorQuantizer(nn.Module):
         var_dim = vq_dim // groups
         num_groups = groups if not combine_groups else 1
 
-        self.vars = nn.Parameter(torch.FloatTensor(1, num_groups * num_vars, var_dim))
+        self.vars = nn.Parameter(torch.FloatTensor(1, num_groups * num_vars, var_dim)) # 量化向量
         if std == 0:
             nn.init.uniform_(self.vars)
         else:
@@ -882,6 +882,7 @@ class GumbelVectorQuantizer(nn.Module):
 
         result = {"num_vars": self.num_vars * self.groups}
 
+        # project x from [B, T, D] to [B * T * groups, num_vars] 
         if not self.time_first:
             x = x.transpose(1, 2)
 
@@ -890,18 +891,20 @@ class GumbelVectorQuantizer(nn.Module):
         x = self.weight_proj(x)
         x = x.view(bsz * tsz * self.groups, -1)
 
+        # 计算 hard 量化结果和困惑度，不可导，只在推理时使用
         with torch.no_grad():
             _, k = x.max(-1)
             hard_x = (
                 x.new_zeros(*x.shape)
                 .scatter_(-1, k.view(-1, 1), 1.0)
                 .view(bsz * tsz, self.groups, -1)
-            )
+            ) # [B * T, groups, num_vars], containing one-hot vec in shape [num_vars,]
             hard_probs = torch.mean(hard_x.float(), dim=0)
             result["code_perplexity"] = torch.exp(
                 -torch.sum(hard_probs * torch.log(hard_probs + 1e-7), dim=-1)
             ).sum()
 
+        # 计算 softmax 概率和困惑度
         avg_probs = torch.softmax(
             x.view(bsz * tsz, self.groups, -1).float(), dim=-1
         ).mean(dim=0)
@@ -911,14 +914,16 @@ class GumbelVectorQuantizer(nn.Module):
 
         result["temp"] = self.curr_temp
 
+        # 训练时使用 Gumbel Softmax，这里 hard 参数不论是 True 还是 False 都可导
         if self.training:
             x = F.gumbel_softmax(x.float(), tau=self.curr_temp, hard=self.hard).type_as(
                 x
-            )
+            ) # [B * T * groups, num_vars], approximately one-hot vec
         else:
-            x = hard_x
+            x = hard_x # [B * T, groups, num_vars], exactly one-hot vec
 
-        x = x.view(bsz * tsz, -1)
+        # 根据 one-hot vec 从 codebook 中查找量化向量，实际上是用 one-hot vec 和一个 nn.Parameter 做了矩阵乘法
+        x = x.view(bsz * tsz, -1) # [B * T, groups * num_vars]
 
         vars = self.vars
         if self.combine_groups:
