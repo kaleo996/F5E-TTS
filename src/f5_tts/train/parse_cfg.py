@@ -6,11 +6,25 @@ def parse_ppg_config(ppg_cfg):
         )
     else:
         cross_mask_config = dict()
+
+    use_transformer = ppg_cfg.get("use_transformer", False)
+    if use_transformer:
+        transformer_config = dict(
+            num_layers = ppg_cfg.transformer_config.num_layers,
+            nhead = ppg_cfg.transformer_config.nhead,
+            dim_feedforward = ppg_cfg.transformer_config.dim_feedforward,
+            dropout = ppg_cfg.transformer_config.dropout
+        )
+    else:
+        transformer_config = dict()
+
     transformer_ppg_config = dict(
         use_ppg = True,
         ppg_dim = ppg_cfg.dim,
         use_cross_mask = use_cross_mask,
-        cross_mask_config = cross_mask_config
+        cross_mask_config = cross_mask_config,
+        use_transformer = use_transformer,
+        transformer_config = transformer_config
     )
     cfm_ppg_config = dict(
         use_ppg = True,

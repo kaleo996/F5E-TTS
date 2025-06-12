@@ -91,28 +91,49 @@ class TextEmbedding(nn.Module):
 
 
 class PPGEmbedding(nn.Module):
-    def __init__(self, ppg_dim, text_dim):
+    def __init__(
+        self,
+        ppg_dim,
+        text_dim,
+        use_transformer=False,
+        transformer_config=dict()
+    ):
         super().__init__()
         self.ppg_dim = ppg_dim
         self.text_dim = text_dim
-        self.ppg_proj = nn.Sequential(
-            nn.Linear(ppg_dim, ppg_dim),
-            PPGInputTranspose(),
-            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
-            nn.BatchNorm1d(ppg_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
-            nn.BatchNorm1d(ppg_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
-            nn.BatchNorm1d(ppg_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            PPGInputTranspose(),
-            nn.Linear(ppg_dim, text_dim), # output ppg in the same dimension as text for alignment
-        )
+        self.use_transformer = use_transformer
+        if use_transformer:
+            self.encoder = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(
+                    d_model=self.ppg_dim,
+                    nhead=transformer_config["nhead"],
+                    dim_feedforward=transformer_config["dim_feedforward"],
+                    dropout=transformer_config["dropout"],
+                    activation=F.gelu,
+                    batch_first=True,
+                ),
+                num_layers=transformer_config["num_layers"]
+            )
+            self.ppg_proj = nn.Linear(ppg_dim, text_dim)
+        else:
+            self.ppg_proj = nn.Sequential(
+                nn.Linear(ppg_dim, ppg_dim),
+                PPGInputTranspose(),
+                nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+                nn.BatchNorm1d(ppg_dim),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+                nn.BatchNorm1d(ppg_dim),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+                nn.BatchNorm1d(ppg_dim),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                PPGInputTranspose(),
+                nn.Linear(ppg_dim, text_dim), # output ppg in the same dimension as text for alignment
+            )
         
     def forward(self, ppg_embed: None | float["b n d"], seq_len,drop_ppg=False, batch=None):  # noqa: F722
         if ppg_embed is None:
@@ -123,6 +144,8 @@ class PPGEmbedding(nn.Module):
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
             if drop_ppg:  # cfg for ppg
                 ppg_embed = torch.zeros_like(ppg_embed)
+        if self.use_transformer:
+            ppg_embed = self.encoder(ppg_embed)
         ppg_embed = self.ppg_proj(ppg_embed)
         return ppg_embed
 
@@ -188,7 +211,12 @@ class DiT(nn.Module):
         
         self.use_ppg = ppg_config["use_ppg"]
         if self.use_ppg:
-            self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
+            self.ppg_embed = PPGEmbedding(
+                ppg_config["ppg_dim"],
+                text_dim,
+                use_transformer=ppg_config["use_transformer"],
+                transformer_config=ppg_config["transformer_config"],
+            )
             self.use_cross_mask = ppg_config.get("use_cross_mask", False)
             if self.use_cross_mask:
                 cross_mask_cfg = ppg_config["cross_mask_config"]
