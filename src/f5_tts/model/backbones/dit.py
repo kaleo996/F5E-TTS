@@ -103,18 +103,20 @@ class PPGEmbedding(nn.Module):
         self.text_dim = text_dim
         self.use_transformer = use_transformer
         if use_transformer:
-            self.encoder = nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(
-                    d_model=self.ppg_dim,
-                    nhead=transformer_config["nhead"],
-                    dim_feedforward=transformer_config["dim_feedforward"],
-                    dropout=transformer_config["dropout"],
-                    activation=F.gelu,
-                    batch_first=True,
+            self.ppg_proj = nn.Sequential(
+                nn.TransformerEncoder(
+                    nn.TransformerEncoderLayer(
+                        d_model=self.ppg_dim,
+                        nhead=transformer_config["nhead"],
+                        dim_feedforward=transformer_config["dim_feedforward"],
+                        dropout=transformer_config["dropout"],
+                        activation=F.gelu,
+                        batch_first=True,
+                    ),
+                    num_layers=transformer_config["num_layers"]
                 ),
-                num_layers=transformer_config["num_layers"]
+                nn.Linear(ppg_dim, text_dim),
             )
-            self.ppg_proj = nn.Linear(ppg_dim, text_dim)
         else:
             self.ppg_proj = nn.Sequential(
                 nn.Linear(ppg_dim, ppg_dim),
@@ -138,14 +140,12 @@ class PPGEmbedding(nn.Module):
     def forward(self, ppg_embed: None | float["b n d"], seq_len,drop_ppg=False, batch=None):  # noqa: F722
         if ppg_embed is None:
             dtype = next(self.ppg_proj.parameters()).dtype
-            ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim), dtype=dtype).to(self.ppg_proj[0].weight.device)
+            ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim), dtype=dtype).to(self.ppg_proj[-1].weight.device)
         else:
             ppg_len = ppg_embed.shape[1]
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
             if drop_ppg:  # cfg for ppg
                 ppg_embed = torch.zeros_like(ppg_embed)
-        if self.use_transformer:
-            ppg_embed = self.encoder(ppg_embed)
         ppg_embed = self.ppg_proj(ppg_embed)
         return ppg_embed
 
