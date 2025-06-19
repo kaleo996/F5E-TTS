@@ -52,18 +52,14 @@ class TextEmbedding(nn.Module):
             self.extra_modeling = False
 
     def forward(self, text: int["b nt"], batch, seq_len, drop_text=False):  # noqa: F722
-        if text is None:
+        if text is None or drop_text:
             text = torch.zeros((batch, seq_len)).int().to(self.text_embed.weight.device)
         else:
             text = text + 1  # use 0 as filler token. preprocess of batch pad -1, see list_str_to_idx()
             text = text[:, :seq_len]  # curtail if character tokens are more than the mel spec tokens
             batch, text_len = text.shape[0], text.shape[1]
             text = F.pad(text, (0, seq_len - text_len), value=0) # pad to the same length as mel
-            if self.mask_padding:
-                text_mask = text == 0
-
-            if drop_text:  # cfg for text
-                text = torch.zeros_like(text)
+        text_mask = text == 0
 
         text = self.text_embed(text)  # b n -> b n d
 
@@ -83,6 +79,7 @@ class TextEmbedding(nn.Module):
                     text = text.masked_fill(text_mask.unsqueeze(-1).expand(-1, -1, text.size(-1)), 0.0)
             else:
                 text = self.text_blocks(text)
+                text = text.masked_fill(text_mask.unsqueeze(-1).expand(-1, -1, text.size(-1)), 0.0)
 
         return text
 
@@ -138,15 +135,13 @@ class PPGEmbedding(nn.Module):
             )
         
     def forward(self, ppg_embed: None | float["b n d"], seq_len,drop_ppg=False, batch=None):  # noqa: F722
-        if ppg_embed is None:
+        if ppg_embed is None or drop_ppg:
             dtype = next(self.ppg_proj.parameters()).dtype
-            ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim), dtype=dtype).to(self.ppg_proj[-1].weight.device)
+            ppg_embed = torch.zeros((batch, seq_len, self.text_dim), dtype=dtype).to(self.ppg_proj[-1].weight.device)
         else:
             ppg_len = ppg_embed.shape[1]
+            ppg_embed = self.ppg_proj(ppg_embed)
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
-            if drop_ppg:  # cfg for ppg
-                ppg_embed = torch.zeros_like(ppg_embed)
-        ppg_embed = self.ppg_proj(ppg_embed)
         return ppg_embed
 
 
