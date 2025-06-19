@@ -373,6 +373,56 @@ class DiT(nn.Module):
 
         return masked_embed
     
+    def cross_mask(self, attn, text_embed, text_len, ppg_embed, ppg_len):
+        B, T_max, P_max = attn.shape
+        device = text_embed.device
+
+        text_mask = torch.zeros((B, T_max), dtype=torch.bool, device=device)
+        ppg_mask = torch.zeros((B, P_max), dtype=torch.bool, device=device)
+
+        # randomly mask 10% of valid text tokens (continuous span)
+        text_len = text_len.to(device)
+        text_len_float = text_len.float()
+        mask_len = torch.clamp((text_len_float * 0.1).floor().long(), min=1)
+        rand = torch.rand(B, device=device)
+        start_pos = (rand * (text_len_float - mask_len + 1e-5)).long().clamp(0, T_max - 1)
+        end_pos = start_pos + mask_len
+        pos_grid = torch.arange(T_max, device=device).expand(B, T_max)
+        text_mask = (pos_grid >= start_pos.unsqueeze(1)) & (pos_grid < end_pos.unsqueeze(1))
+
+        # find ppg tokens aligned with unmasked text tokens
+        valid_text_mask = ~text_mask  # shape: [B, T_max]
+        valid_text_mask &= (pos_grid < text_len.unsqueeze(1))  # only tokens that are not padding
+        valid_text_mask_expanded = valid_text_mask.unsqueeze(-1)  # [B, T, 1]
+        aligned_ppg = (attn * valid_text_mask_expanded).sum(dim=1) > 0  # ([B, T_max, P_max] * [B, T, 1]).sum(dim=1) → [B, P_max]
+
+        # mask 10% of those aligned ppg tokens (continuous span)
+        ppg_len_float = ppg_len.float()
+        ppg_mask_len = torch.clamp((ppg_len_float * 0.1).floor().long(), min=1)
+
+        # get valid indices per sample
+        ppg_positions = torch.arange(P_max, device=device).expand(B, P_max)
+        ppg_valid_ids = []
+
+        for i in range(B):
+            ids = ppg_positions[i][aligned_ppg[i]]
+            ppg_valid_ids.append(ids)
+
+        # random start index within valid ppg indices
+        for i in range(B):
+            ids = ppg_valid_ids[i]
+            n = len(ids)
+            k = ppg_mask_len[i].item()
+            if n < k:
+                continue
+            start_idx = torch.randint(0, n - k + 1, ()).item()
+            ppg_mask[i, ids[start_idx:start_idx + k]] = True
+
+        text_embed = text_embed.masked_fill(text_mask.unsqueeze(-1), 0)
+        ppg_embed = ppg_embed.masked_fill(ppg_mask.unsqueeze(-1), 0)
+
+        return text_embed, ppg_embed
+
     def sample(
         self,
         x: float["b n d"],  # nosied input audio  # noqa: F722
@@ -478,9 +528,12 @@ class DiT(nn.Module):
                 extra_loss += perplex_loss
         
         if self.use_cross_mask:
-            if not drop_text:
+            if use_both_modal:
+                attn = self.align_text_ppg(text_embed, text_len, ppg_embed, ppg_len)
+                text_embed, ppg_embed = self.cross_mask(attn, text_embed, text_len, ppg_embed, ppg_len)
+            elif not drop_text:
                 text_embed = self.single_mask(text_embed, text_len)
-            if not drop_ppg:
+            elif not drop_ppg:
                 ppg_embed = self.single_mask(ppg_embed, ppg_len)
         
         x = self.input_embed(x, cond, text_embed, ppg_embed, drop_audio_cond=drop_audio_cond)
