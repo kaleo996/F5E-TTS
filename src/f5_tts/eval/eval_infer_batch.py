@@ -79,6 +79,9 @@ def main():
         from g2p_mix import G2pMix
         g2p = G2pMix()
 
+    if tokenizer == "phone-level-pinyin":
+        from f5_tts.model.utils import convert_char_to_finer_pinyin
+
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
     target_sample_rate = model_cfg.model.mel_spec.target_sample_rate
     n_mel_channels = model_cfg.model.mel_spec.n_mel_channels
@@ -200,6 +203,9 @@ def main():
                 g2p_list = g2p.g2p(final_text_list[0])
                 final_text_list = [phone for phone in g2p_list[0].phones] + [phone for token in g2p_list[1:] for phone in (token.phones if token.lang=="SYM" else [" "] + token.phones)]
                 final_text_list = [final_text_list]
+
+            if tokenizer == "phone-level-pinyin":
+                final_text_list = convert_char_to_finer_pinyin(final_text_list, polyphone=True)
 
             # Inference
             with torch.inference_mode():

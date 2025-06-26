@@ -52,18 +52,14 @@ class TextEmbedding(nn.Module):
             self.extra_modeling = False
 
     def forward(self, text: int["b nt"], batch, seq_len, drop_text=False):  # noqa: F722
-        if text is None:
+        if text is None or drop_text:
             text = torch.zeros((batch, seq_len)).int().to(self.text_embed.weight.device)
         else:
             text = text + 1  # use 0 as filler token. preprocess of batch pad -1, see list_str_to_idx()
             text = text[:, :seq_len]  # curtail if character tokens are more than the mel spec tokens
             batch, text_len = text.shape[0], text.shape[1]
             text = F.pad(text, (0, seq_len - text_len), value=0) # pad to the same length as mel
-            if self.mask_padding:
-                text_mask = text == 0
-
-            if drop_text:  # cfg for text
-                text = torch.zeros_like(text)
+        text_mask = text == 0
 
         text = self.text_embed(text)  # b n -> b n d
 
@@ -83,6 +79,7 @@ class TextEmbedding(nn.Module):
                     text = text.masked_fill(text_mask.unsqueeze(-1).expand(-1, -1, text.size(-1)), 0.0)
             else:
                 text = self.text_blocks(text)
+                text = text.masked_fill(text_mask.unsqueeze(-1).expand(-1, -1, text.size(-1)), 0.0)
 
         return text
 
@@ -91,39 +88,60 @@ class TextEmbedding(nn.Module):
 
 
 class PPGEmbedding(nn.Module):
-    def __init__(self, ppg_dim, text_dim):
+    def __init__(
+        self,
+        ppg_dim,
+        text_dim,
+        use_transformer=False,
+        transformer_config=dict()
+    ):
         super().__init__()
         self.ppg_dim = ppg_dim
         self.text_dim = text_dim
-        self.ppg_proj = nn.Sequential(
-            nn.Linear(ppg_dim, ppg_dim),
-            PPGInputTranspose(),
-            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
-            nn.BatchNorm1d(ppg_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
-            nn.BatchNorm1d(ppg_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
-            nn.BatchNorm1d(ppg_dim),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            PPGInputTranspose(),
-            nn.Linear(ppg_dim, text_dim), # output ppg in the same dimension as text for alignment
-        )
+        self.use_transformer = use_transformer
+        if use_transformer:
+            self.ppg_proj = nn.Sequential(
+                nn.TransformerEncoder(
+                    nn.TransformerEncoderLayer(
+                        d_model=self.ppg_dim,
+                        nhead=transformer_config["nhead"],
+                        dim_feedforward=transformer_config["dim_feedforward"],
+                        dropout=transformer_config["dropout"],
+                        activation=F.gelu,
+                        batch_first=True,
+                    ),
+                    num_layers=transformer_config["num_layers"]
+                ),
+                nn.Linear(ppg_dim, text_dim),
+            )
+        else:
+            self.ppg_proj = nn.Sequential(
+                nn.Linear(ppg_dim, ppg_dim),
+                PPGInputTranspose(),
+                nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+                nn.BatchNorm1d(ppg_dim),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+                nn.BatchNorm1d(ppg_dim),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                nn.Conv1d(ppg_dim, ppg_dim, kernel_size=5, padding="same"),
+                nn.BatchNorm1d(ppg_dim),
+                nn.ReLU(),
+                nn.Dropout(0.5),
+                PPGInputTranspose(),
+                nn.Linear(ppg_dim, text_dim), # output ppg in the same dimension as text for alignment
+            )
         
     def forward(self, ppg_embed: None | float["b n d"], seq_len,drop_ppg=False, batch=None):  # noqa: F722
-        if ppg_embed is None:
+        if ppg_embed is None or drop_ppg:
             dtype = next(self.ppg_proj.parameters()).dtype
-            ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim), dtype=dtype).to(self.ppg_proj[0].weight.device)
+            ppg_embed = torch.zeros((batch, seq_len, self.text_dim), dtype=dtype).to(self.ppg_proj[-1].weight.device)
         else:
             ppg_len = ppg_embed.shape[1]
+            ppg_embed = self.ppg_proj(ppg_embed)
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
-            if drop_ppg:  # cfg for ppg
-                ppg_embed = torch.zeros_like(ppg_embed)
-        ppg_embed = self.ppg_proj(ppg_embed)
         return ppg_embed
 
 
@@ -188,7 +206,12 @@ class DiT(nn.Module):
         
         self.use_ppg = ppg_config["use_ppg"]
         if self.use_ppg:
-            self.ppg_embed = PPGEmbedding(ppg_config["ppg_dim"], text_dim)
+            self.ppg_embed = PPGEmbedding(
+                ppg_config["ppg_dim"],
+                text_dim,
+                use_transformer=ppg_config["use_transformer"],
+                transformer_config=ppg_config["transformer_config"],
+            )
             self.use_cross_mask = ppg_config.get("use_cross_mask", False)
             if self.use_cross_mask:
                 cross_mask_cfg = ppg_config["cross_mask_config"]

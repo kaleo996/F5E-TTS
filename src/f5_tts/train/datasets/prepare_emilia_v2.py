@@ -42,7 +42,7 @@ def process_audio_directory(audio_dir):
                         text = text.translate(str.maketrans({",": "，", "!": "！", "?": "？"}))
                 if tokenizer == "pinyin":
                     text = convert_char_to_pinyin([text], polyphone=polyphone)[0]
-                elif tokenizer == "finer-pinyin":
+                elif tokenizer == "phone-level-pinyin":
                     text = convert_char_to_finer_pinyin([text], polyphone=polyphone)[0]
 
                 duration = obj["duration"]
@@ -104,7 +104,7 @@ def main():
 
 if __name__ == "__main__":
     max_workers = 32
-    tokenizer = "finer-pinyin"
+    tokenizer = "phone-level-pinyin"
     polyphone = True
     dataset_dir = "/apdcephfs_sh3/share_301772008/private/nenali/chukewang/data/emilia/Emilia-Dataset-unzipped"
     splits = ["Emilia", "Emilia-YODAS"]
