@@ -138,12 +138,15 @@ class PPGEmbedding(nn.Module):
             )
         
     def forward(self, ppg_embed: None | float["b n d"], seq_len,drop_ppg=False, batch=None):  # noqa: F722
+        dtype = next(self.ppg_proj.parameters()).dtype
         if ppg_embed is None:
-            dtype = next(self.ppg_proj.parameters()).dtype
             ppg_embed = torch.zeros((batch, seq_len, self.ppg_dim), dtype=dtype).to(self.ppg_proj[-1].weight.device)
         else:
             ppg_len = ppg_embed.shape[1]
             ppg_embed = F.pad(ppg_embed, (0,0,0, seq_len - ppg_len), value=0) # pad to the same length as mel
+            # check float precision
+            if ppg_embed.dtype != dtype:
+                ppg_embed = ppg_embed.to(dtype)
             if drop_ppg:  # cfg for ppg
                 ppg_embed = torch.zeros_like(ppg_embed)
         ppg_embed = self.ppg_proj(ppg_embed)

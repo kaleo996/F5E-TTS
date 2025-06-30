@@ -26,6 +26,8 @@ def get_seedtts_testset_metainfo(metalst):
     for line in lines:
         if len(line.strip().split("|")) == 5:
             utt, prompt_text, prompt_wav, gt_text, gt_wav = line.strip().split("|")
+            if not os.path.isabs(gt_wav):
+                gt_wav = os.path.join(os.path.dirname(metalst), gt_wav)
         elif len(line.strip().split("|")) == 4:
             utt, prompt_text, prompt_wav, gt_text = line.strip().split("|")
             gt_wav = os.path.join(os.path.dirname(metalst), "wavs", utt + ".wav")
@@ -275,13 +277,12 @@ def get_vc_inference_prompt(
         target_sample_rate=target_sample_rate,
         mel_spec_type=mel_spec_type,
     )
-    
-    # 用于提取PPG特征的KaldiFbank
+
     from f5_tts.ppg.wenet.dataset.feats import kaldiFbank
     feat_cal = kaldiFbank().eval()
 
-    for utt, prompt_wav, gt_wav in tqdm(metainfo, desc="Processing VC prompts..."):
-        # 加载参考音频
+    for utt, prompt_text, prompt_wav, gt_text, gt_wav in tqdm(metainfo, desc="Processing VC prompts..."):
+        # Audio
         ref_audio, ref_sr = torchaudio.load(prompt_wav)
         ref_rms = torch.sqrt(torch.mean(torch.square(ref_audio)))
         if ref_rms < target_rms:
@@ -291,42 +292,39 @@ def get_vc_inference_prompt(
             resampler = torchaudio.transforms.Resample(ref_sr, target_sample_rate)
             ref_audio = resampler(ref_audio)
 
-        # 计算参考音频的mel谱
         ref_mel = mel_spectrogram(ref_audio)
         ref_mel = ref_mel.squeeze(0)
         ref_mel_len = ref_audio.shape[-1] // hop_length
 
-        # 加载目标音频并计算PPG特征
+        # PPG
         gt_audio, gt_sr = torchaudio.load(gt_wav)
-        if gt_sr != 16000:  # PPG模型需要16kHz输入
+        if gt_sr != 16000:
             resampler_ppg = torchaudio.transforms.Resample(gt_sr, 16000)
             gt_audio_ppg = resampler_ppg(gt_audio)
         else:
             gt_audio_ppg = gt_audio
 
-        # 确保音频是单声道
-        if gt_audio_ppg.shape[0] > 1:
+        if gt_audio_ppg.shape[0] > 1: # check if audio is mono-channel
             gt_audio_ppg = torch.mean(gt_audio_ppg, dim=0, keepdim=True)
 
-        # 提取特征用于PPG计算
         feats, feats_len = feat_cal(gt_audio_ppg)
-        mel_spec_for_ppg = feats[0].transpose(0, 1)  # 转置以匹配模型期望的形状
+        mel_spec_for_ppg = feats[0].transpose(0, 1)
+        # import ipdb; ipdb.set_trace()
 
-        # 使用PPG模型提取特征
         with torch.no_grad():
-            mel_spec_for_ppg = mel_spec_for_ppg.unsqueeze(0).transpose(1, 2)  # 添加批次维度并转置
-            ppg, ppg_length = ppg_model.mel_to_ppg(mel_spec_for_ppg, torch.tensor([mel_spec_for_ppg.shape[2]]))
-            ppg = ppg.squeeze(0)  # 移除批次维度
+            mel_spec_for_ppg = mel_spec_for_ppg.unsqueeze(0).transpose(1, 2).to(ppg_model.device)
+            mel_lengths_for_ppg = torch.tensor([mel_spec_for_ppg.shape[1]]).to(ppg_model.device)
+            ppg, ppg_length = ppg_model.mel_to_ppg(mel_spec_for_ppg, mel_lengths_for_ppg)
+            ppg = ppg.squeeze(0)
             ppg_length = ppg_length.item()
 
-        # 计算总帧数
+        # Duration, mel frame length
         if use_truth_duration:
             if gt_sr != target_sample_rate:
                 resampler = torchaudio.transforms.Resample(gt_sr, target_sample_rate)
                 gt_audio = resampler(gt_audio)
             total_mel_len = ref_mel_len + int(gt_audio.shape[-1] / hop_length / speed)
         else:
-            # 估算目标音频长度
             ref_audio_len = ref_audio.shape[-1] / target_sample_rate
             gt_audio_len = gt_audio.shape[-1] / gt_sr if gt_sr != 0 else 0
             total_mel_len = ref_mel_len + int(ref_mel_len * (gt_audio_len / ref_audio_len) / speed)

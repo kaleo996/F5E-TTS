@@ -19,7 +19,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from f5_tts.eval.utils_eval import (
-    get_tts_inference_prompt,
+    get_vc_inference_prompt,
     get_librispeech_test_clean_metainfo,
     get_seedtts_testset_metainfo,
 )
@@ -27,6 +27,7 @@ from f5_tts.infer.utils_infer import load_checkpoint, load_vocoder
 from f5_tts.model import CFM
 from f5_tts.model.utils import get_tokenizer
 from f5_tts.train.parse_cfg import parse_ppg_config, parse_codebook_config
+from f5_tts.ppg.ppg_model import PPGModelWapper
 
 
 accelerator = Accelerator()
@@ -52,9 +53,9 @@ def main():
     parser.add_argument("-ss", "--swaysampling", default=-1, type=float)
 
     parser.add_argument("-t", "--testset", required=True)
-    
+
     parser.add_argument("-as", "--alpha_spk", default=2.5, type=float)
-    parser.add_argument("-at", "--alpha_txt", default=3, type=float)
+    parser.add_argument("-ap", "--alpha_ppg", default=3, type=float)
 
     args = parser.parse_args()
 
@@ -68,7 +69,7 @@ def main():
 
     testset = args.testset
     alpha_spk = args.alpha_spk
-    alpha_txt = args.alpha_txt
+    alpha_ppg = args.alpha_ppg
 
     infer_batch_size = 1  # max frames. 1 for ddp single inference (recommended)
     speed = 1.0
@@ -81,6 +82,7 @@ def main():
 
     dataset_name = model_cfg.datasets.name
     tokenizer = model_cfg.model.tokenizer
+
     mel_spec_type = model_cfg.model.mel_spec.mel_spec_type
     target_sample_rate = model_cfg.model.mel_spec.target_sample_rate
     n_mel_channels = model_cfg.model.mel_spec.n_mel_channels
@@ -106,30 +108,42 @@ def main():
         metainfo = get_librispeech_test_clean_metainfo(metalst, librispeech_test_clean_path)
 
     elif testset == "seedtts_test_zh":
-        metalst = rel_path + "/data/seedtts_testset/zh/meta.lst"
+        metalst = rel_path + "/data/seedtts_testset/zh/meta_test.lst"
         metainfo = get_seedtts_testset_metainfo(metalst)
 
     elif testset == "seedtts_test_en":
-        metalst = rel_path + "/data/seedtts_testset/en/meta.lst"
+        metalst = rel_path + "/data/seedtts_testset/en/non_para_reconstruct_meta.lst"
         metainfo = get_seedtts_testset_metainfo(metalst)
 
     # path to save genereted wavs
     output_dir = (
         f"{rel_path}/"
-        f"results/{exp_name}_{ckpt_step}/{testset}/tts/"
+        f"results/{exp_name}_{ckpt_step}/{testset}/vc/"
         f"seed{seed}_{ode_method}_nfe{nfe_step}_{mel_spec_type}"
         f"{f'_ss{sway_sampling_coef}' if sway_sampling_coef else ''}"
-        f"_alpha_spk{alpha_spk}_txt{alpha_txt}_speed{speed}"
+        f"_alpha_spk{alpha_spk}_ppg{alpha_ppg}_speed{speed}"
         f"{'_gt-dur' if use_truth_duration else ''}"
         f"{'_no-ref-audio' if no_ref_audio else ''}"
     )
 
     # -------------------------------------------------#
+    
+    ppg_model = PPGModelWapper(
+        trainer_ppg_config["model_path"],
+        trainer_ppg_config["config"],
+        device=device, 
+        output_type=trainer_ppg_config["output_type"], 
+        ppg_frame_length=trainer_ppg_config["frame_length"], 
+        mel_f_shift = trainer_ppg_config["mel_frame_shift"], 
+        map_mix_ratio=trainer_ppg_config["map_mix_ratio"], 
+        global_phn_center_path=trainer_ppg_config["global_phn_center_path"],
+        para_softmax_path = trainer_ppg_config["para_softmax_path"]
+    )
 
-    prompts_all = get_tts_inference_prompt(
+    prompts_all = get_vc_inference_prompt(
         metainfo,
+        ppg_model,
         speed=speed,
-        tokenizer=tokenizer,
         target_sample_rate=target_sample_rate,
         n_mel_channels=n_mel_channels,
         hop_length=hop_length,
@@ -149,8 +163,6 @@ def main():
 
     # Tokenizer
     vocab_char_map, vocab_size = get_tokenizer(dataset_name, tokenizer)
-    
-    # TODO load PPG model according to trainer_ppg_config
 
     # Model
     model = CFM(
@@ -193,21 +205,21 @@ def main():
 
     with accelerator.split_between_processes(prompts_all) as prompts:
         for prompt in tqdm(prompts, disable=not accelerator.is_local_main_process):
-            utts, ref_rms_list, ref_mels, ref_mel_lens, total_mel_lens, final_text_list = prompt
+            utts, ref_rms_list, ref_mels, ref_mel_lens, total_mel_lens, ppg_list, ppg_lens = prompt
             ref_mels = ref_mels.to(device)
             ref_mel_lens = torch.tensor(ref_mel_lens, dtype=torch.long).to(device)
             total_mel_lens = torch.tensor(total_mel_lens, dtype=torch.long).to(device)
 
             # Inference
             with torch.inference_mode():
-                generated, _ = model.sample_tts(
+                generated, _ = model.sample_vc(
                     cond=ref_mels,
-                    text=final_text_list,
+                    ppg=ppg_list,
                     duration=total_mel_lens,
                     lens=ref_mel_lens,
                     steps=nfe_step,
                     alpha_spk=alpha_spk,
-                    alpha_txt=alpha_txt,
+                    alpha_ppg=alpha_ppg,
                     sway_sampling_coef=sway_sampling_coef,
                     no_ref_audio=no_ref_audio,
                     seed=seed,
