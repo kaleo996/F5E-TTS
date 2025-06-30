@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from f5_tts.eval.ecapa_tdnn import ECAPA_TDNN_SMALL
 from f5_tts.model.modules import MelSpec
-from f5_tts.model.utils import convert_char_to_pinyin
+from f5_tts.model.utils import convert_char_to_pinyin, convert_char_to_finer_pinyin
 
 from transformers import WhisperProcessor, WhisperForConditionalGeneration
 
@@ -108,6 +108,10 @@ def get_inference_prompt(
         target_sample_rate=target_sample_rate,
         mel_spec_type=mel_spec_type,
     )
+    
+    if tokenizer == "g2p-mix":
+        from g2p_mix import G2pMix
+        g2p = G2pMix()
 
     for utt, prompt_text, prompt_wav, gt_text, gt_wav in tqdm(metainfo, desc="Processing prompts..."):
         # Audio
@@ -126,6 +130,12 @@ def get_inference_prompt(
         text = [prompt_text + gt_text]
         if tokenizer == "pinyin":
             text_list = convert_char_to_pinyin(text, polyphone=polyphone)
+        elif tokenizer == "g2p-mix":
+            g2p_list = g2p.g2p(text[0])
+            text = [phone for phone in g2p_list[0].phones] + [phone for token in g2p_list[1:] for phone in (token.phones if token.lang=="SYM" else [" "] + token.phones)]
+            text_list = [text]
+        elif tokenizer == "phone-level-pinyin":
+            text_list = convert_char_to_finer_pinyin(text, polyphone=polyphone)
         else:
             text_list = text
 
@@ -201,6 +211,176 @@ def get_inference_prompt(
                 )
             )
     # not only leave easy work for last workers
+    random.seed(666)
+    random.shuffle(prompts_all)
+
+    return prompts_all
+
+
+get_tts_inference_prompt = get_inference_prompt
+
+
+# padded to max length ppg batch
+def padded_ppg_batch(ppg_features, ppg_lengths):
+    max_ppg_length = max(ppg_lengths)
+    padded_ppg = []
+    for ppg in ppg_features:
+        # 确保PPG特征是二维张量 [时间步, 特征维度]
+        if ppg.dim() == 1:
+            ppg = ppg.unsqueeze(1)
+        
+        # 计算需要填充的长度
+        padding_length = max_ppg_length - ppg.shape[0]
+        
+        # 对时间维度进行填充
+        padded_ppg.append(F.pad(ppg, (0, 0, 0, padding_length), value=0))
+    
+    # 堆叠成批次张量 [批次大小, 最大长度, 特征维度]
+    padded_ppg = torch.stack(padded_ppg)
+    return padded_ppg
+
+
+def get_vc_inference_prompt(
+    metainfo,
+    ppg_model,
+    speed=1.0,
+    target_sample_rate=24000,
+    n_fft=1024,
+    win_length=1024,
+    n_mel_channels=100,
+    hop_length=256,
+    mel_spec_type="vocos",
+    target_rms=0.1,
+    use_truth_duration=False,
+    infer_batch_size=1,
+    num_buckets=200,
+    min_secs=3,
+    max_secs=40,
+):
+    prompts_all = []
+
+    min_tokens = min_secs * target_sample_rate // hop_length
+    max_tokens = max_secs * target_sample_rate // hop_length
+
+    batch_accum = [0] * num_buckets
+    utts, ref_rms_list, ref_mels, ref_mel_lens, total_mel_lens, ppg_list, ppg_lens = (
+        [[] for _ in range(num_buckets)] for _ in range(7)
+    )
+
+    mel_spectrogram = MelSpec(
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        n_mel_channels=n_mel_channels,
+        target_sample_rate=target_sample_rate,
+        mel_spec_type=mel_spec_type,
+    )
+    
+    # 用于提取PPG特征的KaldiFbank
+    from f5_tts.ppg.wenet.dataset.feats import kaldiFbank
+    feat_cal = kaldiFbank().eval()
+
+    for utt, prompt_wav, gt_wav in tqdm(metainfo, desc="Processing VC prompts..."):
+        # 加载参考音频
+        ref_audio, ref_sr = torchaudio.load(prompt_wav)
+        ref_rms = torch.sqrt(torch.mean(torch.square(ref_audio)))
+        if ref_rms < target_rms:
+            ref_audio = ref_audio * target_rms / ref_rms
+        assert ref_audio.shape[-1] > 5000, f"Empty prompt wav: {prompt_wav}, or torchaudio backend issue."
+        if ref_sr != target_sample_rate:
+            resampler = torchaudio.transforms.Resample(ref_sr, target_sample_rate)
+            ref_audio = resampler(ref_audio)
+
+        # 计算参考音频的mel谱
+        ref_mel = mel_spectrogram(ref_audio)
+        ref_mel = ref_mel.squeeze(0)
+        ref_mel_len = ref_audio.shape[-1] // hop_length
+
+        # 加载目标音频并计算PPG特征
+        gt_audio, gt_sr = torchaudio.load(gt_wav)
+        if gt_sr != 16000:  # PPG模型需要16kHz输入
+            resampler_ppg = torchaudio.transforms.Resample(gt_sr, 16000)
+            gt_audio_ppg = resampler_ppg(gt_audio)
+        else:
+            gt_audio_ppg = gt_audio
+
+        # 确保音频是单声道
+        if gt_audio_ppg.shape[0] > 1:
+            gt_audio_ppg = torch.mean(gt_audio_ppg, dim=0, keepdim=True)
+
+        # 提取特征用于PPG计算
+        feats, feats_len = feat_cal(gt_audio_ppg)
+        mel_spec_for_ppg = feats[0].transpose(0, 1)  # 转置以匹配模型期望的形状
+
+        # 使用PPG模型提取特征
+        with torch.no_grad():
+            mel_spec_for_ppg = mel_spec_for_ppg.unsqueeze(0).transpose(1, 2)  # 添加批次维度并转置
+            ppg, ppg_length = ppg_model.mel_to_ppg(mel_spec_for_ppg, torch.tensor([mel_spec_for_ppg.shape[2]]))
+            ppg = ppg.squeeze(0)  # 移除批次维度
+            ppg_length = ppg_length.item()
+
+        # 计算总帧数
+        if use_truth_duration:
+            if gt_sr != target_sample_rate:
+                resampler = torchaudio.transforms.Resample(gt_sr, target_sample_rate)
+                gt_audio = resampler(gt_audio)
+            total_mel_len = ref_mel_len + int(gt_audio.shape[-1] / hop_length / speed)
+        else:
+            # 估算目标音频长度
+            ref_audio_len = ref_audio.shape[-1] / target_sample_rate
+            gt_audio_len = gt_audio.shape[-1] / gt_sr if gt_sr != 0 else 0
+            total_mel_len = ref_mel_len + int(ref_mel_len * (gt_audio_len / ref_audio_len) / speed)
+
+        # 处理批次
+        assert infer_batch_size > 0, "infer_batch_size should be greater than 0."
+        assert min_tokens <= total_mel_len <= max_tokens, (
+            f"Audio {utt} has duration {total_mel_len * hop_length // target_sample_rate}s out of range [{min_secs}, {max_secs}]."
+        )
+        bucket_i = math.floor((total_mel_len - min_tokens) / (max_tokens - min_tokens + 1) * num_buckets)
+
+        utts[bucket_i].append(utt)
+        ref_rms_list[bucket_i].append(ref_rms)
+        ref_mels[bucket_i].append(ref_mel)
+        ref_mel_lens[bucket_i].append(ref_mel_len)
+        total_mel_lens[bucket_i].append(total_mel_len)
+        ppg_list[bucket_i].append(ppg)
+        ppg_lens[bucket_i].append(ppg_length)
+
+        batch_accum[bucket_i] += total_mel_len
+
+        if batch_accum[bucket_i] >= infer_batch_size:
+            prompts_all.append(
+                (
+                    utts[bucket_i],
+                    ref_rms_list[bucket_i],
+                    padded_mel_batch(ref_mels[bucket_i]),
+                    ref_mel_lens[bucket_i],
+                    total_mel_lens[bucket_i],
+                    padded_ppg_batch(ppg_list[bucket_i], ppg_lens[bucket_i]),
+                    ppg_lens[bucket_i],
+                )
+            )
+            batch_accum[bucket_i] = 0
+            utts[bucket_i], ref_rms_list[bucket_i], ref_mels[bucket_i], ref_mel_lens[bucket_i], total_mel_lens[bucket_i], ppg_list[bucket_i], ppg_lens[bucket_i] = (
+                [], [], [], [], [], [], []
+            )
+
+    # 添加剩余的批次
+    for bucket_i, bucket_frames in enumerate(batch_accum):
+        if bucket_frames > 0:
+            prompts_all.append(
+                (
+                    utts[bucket_i],
+                    ref_rms_list[bucket_i],
+                    padded_mel_batch(ref_mels[bucket_i]),
+                    ref_mel_lens[bucket_i],
+                    total_mel_lens[bucket_i],
+                    padded_ppg_batch(ppg_list[bucket_i], ppg_lens[bucket_i]),
+                    ppg_lens[bucket_i],
+                )
+            )
+    
+    # 随机打乱批次顺序
     random.seed(666)
     random.shuffle(prompts_all)
 

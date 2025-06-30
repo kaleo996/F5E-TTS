@@ -1,3 +1,6 @@
+# use sample_tts API of CFM to generate audio
+# this new API supports controlling CFG strengths of different conditions separately
+
 import os
 import sys
 
@@ -16,7 +19,7 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from f5_tts.eval.utils_eval import (
-    get_inference_prompt,
+    get_tts_inference_prompt,
     get_librispeech_test_clean_metainfo,
     get_seedtts_testset_metainfo,
 )
@@ -49,6 +52,9 @@ def main():
     parser.add_argument("-ss", "--swaysampling", default=-1, type=float)
 
     parser.add_argument("-t", "--testset", required=True)
+    
+    parser.add_argument("-as", "--alpha_spk", default=2.5, type=float)
+    parser.add_argument("-at", "--alpha_txt", default=3, type=float)
 
     args = parser.parse_args()
 
@@ -61,9 +67,10 @@ def main():
     sway_sampling_coef = args.swaysampling
 
     testset = args.testset
+    alpha_spk = args.alpha_spk
+    alpha_txt = args.alpha_txt
 
     infer_batch_size = 1  # max frames. 1 for ddp single inference (recommended)
-    cfg_strength = 2.0
     speed = 1.0
     use_truth_duration = False
     no_ref_audio = False
@@ -112,14 +119,14 @@ def main():
         f"results/{exp_name}_{ckpt_step}/{testset}/"
         f"seed{seed}_{ode_method}_nfe{nfe_step}_{mel_spec_type}"
         f"{f'_ss{sway_sampling_coef}' if sway_sampling_coef else ''}"
-        f"_cfg{cfg_strength}_speed{speed}"
+        f"_alpha_spk{alpha_spk}_txt{alpha_txt}_speed{speed}"
         f"{'_gt-dur' if use_truth_duration else ''}"
         f"{'_no-ref-audio' if no_ref_audio else ''}"
     )
 
     # -------------------------------------------------#
 
-    prompts_all = get_inference_prompt(
+    prompts_all = get_tts_inference_prompt(
         metainfo,
         speed=speed,
         tokenizer=tokenizer,
@@ -193,13 +200,14 @@ def main():
 
             # Inference
             with torch.inference_mode():
-                generated, _ = model.sample(
+                generated, _ = model.sample_tts(
                     cond=ref_mels,
                     text=final_text_list,
                     duration=total_mel_lens,
                     lens=ref_mel_lens,
                     steps=nfe_step,
-                    cfg_strength=cfg_strength,
+                    alpha_spk=alpha_spk,
+                    alpha_txt=alpha_txt,
                     sway_sampling_coef=sway_sampling_coef,
                     no_ref_audio=no_ref_audio,
                     seed=seed,
@@ -221,6 +229,7 @@ def main():
     if accelerator.is_main_process:
         timediff = time.time() - start
         print(f"Done batch inference in {timediff / 60:.2f} minutes.")
+        print(f"Results saved to {output_dir}")
 
 
 if __name__ == "__main__":
