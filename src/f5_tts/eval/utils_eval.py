@@ -307,7 +307,19 @@ def get_vc_inference_prompt(
         if gt_audio_ppg.shape[0] > 1: # check if audio is mono-channel
             gt_audio_ppg = torch.mean(gt_audio_ppg, dim=0, keepdim=True)
 
-        feats, feats_len = feat_cal(gt_audio_ppg)
+        prompt_audio, prompt_sr = torchaudio.load(gt_wav)
+        if prompt_sr != 16000:
+            resampler_ppg = torchaudio.transforms.Resample(prompt_sr, 16000)
+            prompt_audio_ppg = resampler_ppg(prompt_audio)
+        else:
+            prompt_audio_ppg = prompt_audio
+
+        if prompt_audio_ppg.shape[0] > 1:
+            prompt_audio_ppg = torch.mean(prompt_audio_ppg, dim=0, keepdim=True)
+        
+        audio_ppg = torch.cat([prompt_audio_ppg, gt_audio_ppg], dim=1)
+
+        feats, feats_len = feat_cal(audio_ppg)
         mel_spec_for_ppg = feats[0].transpose(0, 1)
         # import ipdb; ipdb.set_trace()
 
