@@ -12,6 +12,7 @@ nohup_outputs/
 accelerate/
 outputs
 *.sh
+*.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
