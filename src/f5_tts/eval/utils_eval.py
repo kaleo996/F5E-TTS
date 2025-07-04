@@ -300,31 +300,29 @@ def get_vc_inference_prompt(
         gt_audio, gt_sr = torchaudio.load(gt_wav)
         if gt_sr != 16000:
             resampler_ppg = torchaudio.transforms.Resample(gt_sr, 16000)
-            gt_audio_ppg = resampler_ppg(gt_audio)
+            gt_audio_for_ppg = resampler_ppg(gt_audio)
         else:
-            gt_audio_ppg = gt_audio
+            gt_audio_for_ppg = gt_audio
 
-        if gt_audio_ppg.shape[0] > 1: # check if audio is mono-channel
-            gt_audio_ppg = torch.mean(gt_audio_ppg, dim=0, keepdim=True)
+        if gt_audio_for_ppg.shape[0] > 1: # check if audio is mono-channel
+            gt_audio_for_ppg = torch.mean(gt_audio_for_ppg, dim=0, keepdim=True)
 
         prompt_audio, prompt_sr = torchaudio.load(gt_wav)
         if prompt_sr != 16000:
             resampler_ppg = torchaudio.transforms.Resample(prompt_sr, 16000)
-            prompt_audio_ppg = resampler_ppg(prompt_audio)
+            prompt_audio_for_ppg = resampler_ppg(prompt_audio)
         else:
-            prompt_audio_ppg = prompt_audio
+            prompt_audio_for_ppg = prompt_audio
 
-        if prompt_audio_ppg.shape[0] > 1:
-            prompt_audio_ppg = torch.mean(prompt_audio_ppg, dim=0, keepdim=True)
+        if prompt_audio_for_ppg.shape[0] > 1:
+            prompt_audio_for_ppg = torch.mean(prompt_audio_for_ppg, dim=0, keepdim=True)
         
-        audio_ppg = torch.cat([prompt_audio_ppg, gt_audio_ppg], dim=1)
+        full_audio_for_ppg = torch.cat([prompt_audio_for_ppg, gt_audio_for_ppg], dim=1)
 
-        feats, feats_len = feat_cal(audio_ppg)
-        mel_spec_for_ppg = feats[0].transpose(0, 1)
-        # import ipdb; ipdb.set_trace()
+        feats, feats_len = feat_cal(full_audio_for_ppg)
 
         with torch.no_grad():
-            mel_spec_for_ppg = mel_spec_for_ppg.unsqueeze(0).transpose(1, 2).to(ppg_model.device)
+            mel_spec_for_ppg = feats.to(ppg_model.device)
             mel_lengths_for_ppg = torch.tensor([mel_spec_for_ppg.shape[1]]).to(ppg_model.device)
             ppg, ppg_length = ppg_model.mel_to_ppg(mel_spec_for_ppg, mel_lengths_for_ppg)
             ppg = ppg.squeeze(0)
@@ -337,9 +335,9 @@ def get_vc_inference_prompt(
                 gt_audio = resampler(gt_audio)
             total_mel_len = ref_mel_len + int(gt_audio.shape[-1] / hop_length / speed)
         else:
-            ref_audio_len = ref_audio.shape[-1] / target_sample_rate
-            gt_audio_len = gt_audio.shape[-1] / gt_sr if gt_sr != 0 else 0
-            total_mel_len = ref_mel_len + int(ref_mel_len * (gt_audio_len / ref_audio_len) / speed)
+            ref_text_len = len(prompt_text.encode("utf-8"))
+            gen_text_len = len(gt_text.encode("utf-8"))
+            total_mel_len = ref_mel_len + int(ref_mel_len / ref_text_len * gen_text_len / speed)
 
         # 处理批次
         assert infer_batch_size > 0, "infer_batch_size should be greater than 0."
@@ -367,7 +365,6 @@ def get_vc_inference_prompt(
                     ref_mel_lens[bucket_i],
                     total_mel_lens[bucket_i],
                     padded_ppg_batch(ppg_list[bucket_i], ppg_lens[bucket_i]),
-                    ppg_lens[bucket_i],
                 )
             )
             batch_accum[bucket_i] = 0
@@ -386,7 +383,6 @@ def get_vc_inference_prompt(
                     ref_mel_lens[bucket_i],
                     total_mel_lens[bucket_i],
                     padded_ppg_batch(ppg_list[bucket_i], ppg_lens[bucket_i]),
-                    ppg_lens[bucket_i],
                 )
             )
     

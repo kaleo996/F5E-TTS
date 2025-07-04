@@ -76,7 +76,7 @@ def main():
     use_truth_duration = False
     no_ref_audio = False
 
-    model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/emilia_ablation/{exp_name}.yaml")))
+    model_cfg = OmegaConf.load(str(files("f5_tts").joinpath(f"configs/libritts_vc/{exp_name}.yaml")))
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arc = model_cfg.model.arch
 
@@ -205,7 +205,7 @@ def main():
 
     with accelerator.split_between_processes(prompts_all) as prompts:
         for prompt in tqdm(prompts, disable=not accelerator.is_local_main_process):
-            utts, ref_rms_list, ref_mels, ref_mel_lens, total_mel_lens, ppg_list, ppg_lens = prompt
+            utts, ref_rms_list, ref_mels, ref_mel_lens, total_mel_lens, ppg_list = prompt
             ref_mels = ref_mels.to(device)
             ref_mel_lens = torch.tensor(ref_mel_lens, dtype=torch.long).to(device)
             total_mel_lens = torch.tensor(total_mel_lens, dtype=torch.long).to(device)
@@ -213,10 +213,9 @@ def main():
             # Inference
             with torch.inference_mode():
                 generated, _ = model.sample_vc(
-                    cond=ref_mels,
+                    cond=ref_mels.squeeze(0)[:ref_mel_lens].unsqueeze(0),
                     ppg=ppg_list,
                     duration=total_mel_lens,
-                    lens=ref_mel_lens,
                     steps=nfe_step,
                     alpha_spk=alpha_spk,
                     alpha_ppg=alpha_ppg,
@@ -224,10 +223,11 @@ def main():
                     no_ref_audio=no_ref_audio,
                     seed=seed,
                 )
+                generated = generated.to(torch.float32)
                 # Final result
                 for i, gen in enumerate(generated):
-                    gen = gen[ref_mel_lens[i] : total_mel_lens[i], :].unsqueeze(0)
-                    gen_mel_spec = gen.permute(0, 2, 1).to(torch.float32)
+                    gen = gen[ref_mel_lens[i]:, :].unsqueeze(0)
+                    gen_mel_spec = gen.permute(0, 2, 1)
                     if mel_spec_type == "vocos":
                         generated_wave = vocoder.decode(gen_mel_spec).cpu()
                     elif mel_spec_type == "bigvgan":
