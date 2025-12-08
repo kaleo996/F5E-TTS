@@ -7,7 +7,6 @@ ckpts/
 wandb/
 results
 pretrained_models
-configs/
 nohup_outputs/
 accelerate/
 outputs
