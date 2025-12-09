@@ -3,12 +3,14 @@
 This repository is a research fork of F5-TTS built to reproduce the results in `F5E-TTS`. It keeps the flow-matching transformer pipeline and extends it with phonetic posteriorgram (PPG) conditioning, vector-quantized codebooks, and related ablations. Only local, script-based workflows are supported; upstream conveniences (pip package, Docker images, Gradio UI) are **not maintained here** even if some code remains.
 
 ## Layout
+
 - `src/f5_tts/train/` – main training scripts, dataset prep scripts.
 - `src/f5_tts/model/` – core models, flow-matching trainer, utilities.
 - `src/f5_tts/configs/` – Hydra configs.
 - `src/f5_tts/eval/` – batch inference for evaluation sets and objective metrics.
 
 ## Environment
+
 - Python 3.10 recommended.
 - Install locally (editable):
   ```bash
@@ -24,11 +26,20 @@ This repository is a research fork of F5-TTS built to reproduce the results in `
   ```
 
 ## Required Assets (place locally and update paths if needed)
+
+Please download the necessary checkpoints from Hugging Face:
+
+* **Vocoder (Vocos):** [charactr/vocos-mel-24khz](https://huggingface.co/charactr/vocos-mel-24khz)
+* **PPG Model:** [wanghappy/ppg](https://huggingface.co/wanghappy/ppg)
+
+Recommended directory structure:
+
 - Vocoder checkpoint (default path in configs): `pretrained_models/vocos-mel-24khz`.
 - PPG model and stats (used when `use_ppg: True` in configs), e.g. `pretrained_models/ppg/33.pt`, its `train.yaml`, and associated `phn_center.npy` / `ce_layer.pkl`.
 - TTS checkpoints: training outputs are saved under `ckpts/...`; inference expects explicit `--ckpt_file` paths.
 
 ## Data Preparation
+
 Dataset preprocessors write Arrow data to `data/{DATASET}_{tokenizer}` with `raw.arrow` (or `mel.arrow`), `duration.json`, and `vocab.txt`. Edit paths inside the scripts, then run, for example:
 ```bash
 # Emilia
@@ -38,6 +49,7 @@ python src/f5_tts/train/datasets/prepare_libritts.py
 ```
 
 ## Training
+
 Write a Hydra config under `src/f5_tts/configs/` that matches your dataset, tokenizer, and features (PPG, codebook, etc.).
 ```bash
 # Example: train a small model with PPG inputs and the codebook on LibriTTS
@@ -45,6 +57,7 @@ accelerate launch src/f5_tts/train/train.py --config-name example.yaml
 ```
 
 ## Inference
+
 Use the local script; the upstream pip entrypoints are not supported here.
 ```bash
 python src/f5_tts/infer/infer_cli.py \
@@ -62,6 +75,7 @@ Tips:
 - If using PPG features, ensure PPG paths in your config/checkpoint are valid.
 
 ## Evaluation
+
 Place test sets under `data/` (Seed-TTS, LibriSpeech test-clean, etc.) and update paths in scripts if needed.
 ```bash
 # Generate evaluation audio
@@ -75,5 +89,17 @@ python src/f5_tts/eval/eval_utmos.py --audio_dir <DIR> --ext wav
 Download the ASR/embedding models referenced in `src/f5_tts/eval/README.md` before running metrics.
 
 ## Reminders
+
 - No maintained support for pip installation as a library, Docker images, or Gradio UI.
 - Keep dataset, checkpoint, vocoder, and PPG paths consistent with your chosen Hydra config.
+
+## Acknowledgements
+
+We appreciate the following works:
+
+* [F5-TTS](https://github.com/SWivid/F5-TTS/) for the base codebase.
+* [LibriTTS](http://www.openslr.org/60/) and [Emilia](https://huggingface.co/datasets/amphion/Emilia-Dataset) datasets.
+* [Vocos](https://huggingface.co/charactr/vocos-mel-24khz) for the vocoder.
+* [WeNet](https://github.com/wenet-e2e/wenet) for the reference of PPG model training.
+* [SpeechT5](https://github.com/microsoft/SpeechT5) for the implementation reference of codebooks.
+* [MegaTTS3](https://arxiv.org/abs/2502.18924) for the implementation reference of CFG.
